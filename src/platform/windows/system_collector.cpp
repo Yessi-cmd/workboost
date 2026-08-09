@@ -2,13 +2,14 @@
 
 #include "core/policy/protection_policy.h"
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include <iphlpapi.h>
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <psapi.h>
 #include <tlhelp32.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <winioctl.h>
 
 #include <algorithm>

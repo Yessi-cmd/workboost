@@ -27,6 +27,7 @@ target_compile_definitions(workboost_core PUBLIC
   WIN32_LEAN_AND_MEAN
   NOMINMAX
   _WIN32_WINNT=0x0A00
+  NTDDI_VERSION=0x0A000000
 )
 target_link_libraries(workboost_core PUBLIC
   advapi32
