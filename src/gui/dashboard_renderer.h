@@ -60,7 +60,6 @@ struct ProcessViewOptions {
 // behavior deterministic and unit-testable.
 struct DashboardOverviewLayout {
   int metric_row_height{};
-  int subtitle_height{};
   int disk_row_height{};
   std::size_t disk_columns{1};
   std::size_t disk_rows{1};

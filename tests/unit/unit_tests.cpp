@@ -10,6 +10,7 @@
 #include "core/optimization/optimization.h"
 #include "core/policy/protection_policy.h"
 #include "core/policy/service_protection_policy.h"
+#include "gui/dashboard.h"
 #include "gui/dashboard_model.h"
 #include "gui/dashboard_renderer.h"
 #include "platform/windows/service_api.h"
@@ -1149,27 +1150,45 @@ void TestDashboardOverviewLayout() {
   const auto regular = workboost::gui::CalculateDashboardOverviewLayout(
       424, 538, 4);
   Check(regular.fits && !regular.compact && regular.disk_columns == 1 &&
-            regular.disk_rows == 4 && regular.required_height == 308,
+            regular.disk_rows == 4 && regular.required_height == 276,
         "four disks should stay in one aligned column when height permits");
 
   const auto constrained = workboost::gui::CalculateDashboardOverviewLayout(
       274, 389, 8);
   Check(constrained.fits && constrained.compact &&
-            constrained.disk_columns == 3 && constrained.disk_rows == 3 &&
-            constrained.required_height == 260,
+            constrained.disk_columns == 2 && constrained.disk_rows == 4 &&
+            constrained.required_height == 262,
         "a constrained overview should compact and flow disks into columns");
 
   const auto many_disks = workboost::gui::CalculateDashboardOverviewLayout(
       424, 538, 26);
   Check(many_disks.fits && many_disks.compact &&
-            many_disks.disk_columns == 4 && many_disks.disk_rows == 7 &&
-            many_disks.required_height == 380,
+            many_disks.disk_columns == 3 && many_disks.disk_rows == 9 &&
+            many_disks.required_height == 412,
         "the initial dashboard size should adapt to every drive letter");
 
   const auto empty = workboost::gui::CalculateDashboardOverviewLayout(
       220, 300, 0);
   Check(empty.fits && empty.disk_columns == 1 && empty.disk_rows == 1,
         "an empty disk inventory should reserve one status row");
+}
+
+void TestDashboardCloseBehavior() {
+  using workboost::gui::DashboardCloseDisposition;
+  using workboost::gui::DashboardCloseRequest;
+  using workboost::gui::ResolveDashboardClose;
+
+  Check(ResolveDashboardClose(DashboardCloseRequest::WindowClose, false) ==
+                DashboardCloseDisposition::HideToTray &&
+            ResolveDashboardClose(DashboardCloseRequest::WindowClose, true) ==
+                DashboardCloseDisposition::HideToTray,
+        "the title-bar close button must always hide the dashboard to tray");
+  Check(ResolveDashboardClose(DashboardCloseRequest::ExplicitExit, true) ==
+                DashboardCloseDisposition::KeepOpen &&
+            ResolveDashboardClose(DashboardCloseRequest::ExplicitExit,
+                                  false) ==
+                DashboardCloseDisposition::Exit,
+        "only an idle explicit tray command may exit WorkBoost");
 }
 
 void TestDashboardRendererHitTargets() {
@@ -2004,6 +2023,7 @@ int main() {
        TestPassiveStartupBenchmarkTimeout},
       {"dashboard presenter", TestDashboardPresenter},
       {"dashboard overview responsive layout", TestDashboardOverviewLayout},
+      {"dashboard close behavior", TestDashboardCloseBehavior},
       {"dashboard renderer hit targets", TestDashboardRendererHitTargets},
       {"dashboard language toggle target",
        TestDashboardLanguageToggleTarget},

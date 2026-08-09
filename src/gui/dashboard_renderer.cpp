@@ -206,12 +206,11 @@ DashboardOverviewLayout CalculateDashboardOverviewLayout(
   constexpr int kDiskColumnGap = 12;
   const std::size_t item_count = std::max<std::size_t>(1, disk_count);
 
-  const auto calculate = [&](int metric_row_height, int subtitle_height,
-                             int disk_row_height, int minimum_column_width,
+  const auto calculate = [&](int metric_row_height, int disk_row_height,
+                             int minimum_column_width,
                              std::size_t column_limit, bool compact) {
     DashboardOverviewLayout layout;
     layout.metric_row_height = metric_row_height;
-    layout.subtitle_height = subtitle_height;
     layout.disk_row_height = disk_row_height;
     layout.compact = compact;
 
@@ -221,8 +220,7 @@ DashboardOverviewLayout CalculateDashboardOverviewLayout(
     const std::size_t maximum_columns = std::max<std::size_t>(
         1, std::min<std::size_t>(column_limit, width_capacity));
     const int fixed_height =
-        kHeaderHeight + 2 * (metric_row_height + subtitle_height) +
-        metric_row_height + kBottomPadding;
+        kHeaderHeight + 3 * metric_row_height + kBottomPadding;
     const int available_disk_rows = std::max(
         1, (std::max(0, maximum_height - fixed_height)) / disk_row_height);
     const std::size_t requested_columns =
@@ -238,10 +236,10 @@ DashboardOverviewLayout CalculateDashboardOverviewLayout(
     return layout;
   };
 
-  auto layout = calculate(32, 16, 32, 152, 3, false);
+  auto layout = calculate(32, 32, 152, 3, false);
   if (layout.fits) return layout;
 
-  auto compact_layout = calculate(30, 14, 30, 112, 4, true);
+  auto compact_layout = calculate(30, 30, 112, 4, true);
   if (compact_layout.fits ||
       compact_layout.required_height < layout.required_height) {
     return compact_layout;
@@ -549,7 +547,6 @@ void DashboardRenderer::DrawDashboard(
     }
   }
   const int row_height = Scale(overview_layout.metric_row_height);
-  const int subtitle_height = Scale(overview_layout.subtitle_height);
   const int disk_row_height = Scale(overview_layout.disk_row_height);
   const int required_top_height = Scale(overview_layout.required_height);
   const int top_height = std::clamp(
@@ -592,7 +589,7 @@ void DashboardRenderer::DrawDashboard(
                          const std::string& subtitle, const RECT& bounds,
                          int preferred_label_width,
                          int preferred_value_width, int metric_height,
-                         int metric_subtitle_height, bool dense) {
+                         bool dense) {
     const int column_gap = Scale(dense ? 6 : 12);
     const int minimum_bar_width = Scale(dense ? 20 : 32);
     const int minimum_value_width = Scale(dense ? 36 : 84);
@@ -640,16 +637,14 @@ void DashboardRenderer::DrawDashboard(
              MakeRect(value_left, primary.top, bar_left - column_gap,
                       primary.bottom),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (!detail.empty()) {
-      DrawUtf8(dc, small_font_, kSecondaryText, detail,
-               MakeRect(value_left, primary.bottom, bar_left - column_gap,
+    const std::string& secondary = detail.empty() ? subtitle : detail;
+    if (!secondary.empty()) {
+      const int secondary_left = detail.empty() ? bounds.left : value_left;
+      const int secondary_right =
+          detail.empty() ? bounds.right : bar_left - column_gap;
+      DrawUtf8(dc, small_font_, kSecondaryText, secondary,
+               MakeRect(secondary_left, primary.bottom, secondary_right,
                         bounds.top + metric_height),
-               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-    if (!subtitle.empty()) {
-      DrawUtf8(dc, small_font_, kSecondaryText, subtitle,
-               MakeRect(bounds.left, bounds.top + metric_height, bounds.right,
-                        bounds.top + metric_height + metric_subtitle_height),
                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
   };
@@ -662,11 +657,10 @@ void DashboardRenderer::DrawDashboard(
                               const std::string& subtitle) {
     draw_metric(label, ratio, value, detail, subtitle,
                 MakeRect(content_left, row_y, content_right,
-                         row_y + row_height +
-                             (subtitle.empty() ? 0 : subtitle_height)),
+                         row_y + row_height),
                 main_label_width, main_value_width, row_height,
-                subtitle_height, false);
-    row_y += row_height + (subtitle.empty() ? 0 : subtitle_height);
+                false);
+    row_y += row_height;
   };
 
   draw_main_metric("CPU", model.system.cpu_percent / 100.0,
@@ -677,11 +671,7 @@ void DashboardRenderer::DrawDashboard(
       FormatBytes(static_cast<double>(model.system.memory_used_bytes)) +
           " / " +
           FormatBytes(static_cast<double>(model.system.memory_total_bytes)),
-      Locale::Format(
-          "{0} available",
-          {FormatBytes(static_cast<double>(
-              model.system.available_memory_bytes))}),
-      model.system.memory_model);
+      std::string{}, model.system.memory_model);
   draw_main_metric(
       "Commit", model.system.commit_ratio,
       FormatPercent(model.system.commit_ratio * 100.0),
@@ -716,8 +706,7 @@ void DashboardRenderer::DrawDashboard(
                 FormatLatency(disk.latency_ms), std::string{},
                 MakeRect(left, top, right, top + disk_row_height),
                 disk_label_width,
-                dense ? Scale(56) : main_value_width, disk_row_height, 0,
-                dense);
+                dense ? Scale(56) : main_value_width, disk_row_height, dense);
   }
   if (model.disks.empty()) {
     DrawUtf8(dc, small_font_, kMutedText,

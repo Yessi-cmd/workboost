@@ -89,7 +89,8 @@ GUI 验证应检查：
 2. Dashboard、Processes、Diagnosis、Coding Mode、Protected Workload、Recovery、Settings 七页均可切换。
 3. 后台采样持续刷新，UI 线程不执行采样或 SCM 控制。
 4. Refresh 只请求新采样；Export all 输出七页当前脱敏视图。
-5. 关闭窗口后后台线程在有限时间内退出。
+5. 标题栏关闭按钮和最小化都会隐藏到托盘，进程继续采样；双击托盘图标可恢复窗口。
+6. 只有托盘菜单中的“退出”会结束进程，随后后台线程在有限时间内退出。
 
 当前开发机的最新 12 秒持续监控测量：
 

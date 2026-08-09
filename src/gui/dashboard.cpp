@@ -276,24 +276,17 @@ class DashboardWindow {
         HandleTrayNotification(lparam);
         return 0;
       case WM_SYSCOMMAND:
-        if (wparam == SC_MINIMIZE) {
-          ShowWindow(window_, SW_HIDE);
-          AddTrayIcon();
+        if ((wparam & 0xFFF0) == SC_MINIMIZE) {
+          HideToTray();
           return 0;
         }
         return DefWindowProcW(window_, message, wparam, lparam);
       case WM_CLOSE:
-        if (coding_command_running_.load()) {
-          MessageBoxW(
-              window_,
-              windows::Utf8ToWide(Locale::Get(
-                  "A Coding Mode operation is still running. Complete the "
-                  "operation before closing WorkBoost."))
-                  .c_str(),
-              L"WorkBoost", MB_OK | MB_ICONINFORMATION);
-          return 0;
+        if (ResolveDashboardClose(DashboardCloseRequest::WindowClose,
+                                  coding_command_running_.load()) ==
+            DashboardCloseDisposition::HideToTray) {
+          HideToTray();
         }
-        DestroyWindow(window_);
         return 0;
       case WM_DESTROY:
         RemoveTrayIcon();
@@ -613,8 +606,8 @@ class DashboardWindow {
     if (worker_.joinable()) worker_.join();
   }
 
-  void AddTrayIcon() {
-    if (tray_icon_added_) return;
+  bool AddTrayIcon() {
+    if (tray_icon_added_) return true;
     tray_icon_ = {};
     tray_icon_.cbSize = sizeof(tray_icon_);
     tray_icon_.hWnd = window_;
@@ -627,9 +620,9 @@ class DashboardWindow {
     lstrcpynW(tray_icon_.szTip, L"WorkBoost", ARRAYSIZE(tray_icon_.szTip));
     tray_icon_.uVersion = NOTIFYICON_VERSION_4;
     tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &tray_icon_) != FALSE;
-    if (!tray_icon_added_) return;
+    if (!tray_icon_added_) return false;
     Shell_NotifyIconW(NIM_SETVERSION, &tray_icon_);
-    if (tray_tip_shown_) return;
+    if (tray_tip_shown_) return true;
     tray_tip_shown_ = true;
     tray_icon_.uFlags = NIF_INFO;
     lstrcpynW(tray_icon_.szInfoTitle, L"WorkBoost",
@@ -640,6 +633,12 @@ class DashboardWindow {
     lstrcpynW(tray_icon_.szInfo, tip.c_str(), ARRAYSIZE(tray_icon_.szInfo));
     tray_icon_.dwInfoFlags = NIIF_INFO;
     Shell_NotifyIconW(NIM_MODIFY, &tray_icon_);
+    return true;
+  }
+
+  void HideToTray() {
+    // Keep the dashboard visible if Explorer rejects the tray icon.
+    if (AddTrayIcon()) ShowWindow(window_, SW_HIDE);
   }
 
   void RemoveTrayIcon() {
@@ -675,7 +674,10 @@ class DashboardWindow {
     if (command == kTrayMenuOpen) {
       RestoreFromTray();
     } else if (command == kTrayMenuExit) {
-      if (coding_command_running_.load()) {
+      const auto disposition = ResolveDashboardClose(
+          DashboardCloseRequest::ExplicitExit,
+          coding_command_running_.load());
+      if (disposition == DashboardCloseDisposition::KeepOpen) {
         MessageBoxW(
             window_,
             windows::Utf8ToWide(Locale::Get(
@@ -683,7 +685,7 @@ class DashboardWindow {
                 "operation before closing WorkBoost."))
                 .c_str(),
             L"WorkBoost", MB_OK | MB_ICONINFORMATION);
-      } else {
+      } else if (disposition == DashboardCloseDisposition::Exit) {
         DestroyWindow(window_);
       }
     }
