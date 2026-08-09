@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  msvc:
+    name: MSVC 2022 x64
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DWORKBOOST_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Install
+        run: cmake --install build --config Release --prefix build/stage
+      - name: Installed CLI smoke
+        shell: pwsh
+        run: |
+          $smoke = (Resolve-Path "$env:GITHUB_WORKSPACE\tests\integration\installed_cli_smoke.ps1").Path
+          Push-Location build/stage
+          try {
+            & $smoke -BinDirectory (Resolve-Path .\bin).Path
+          } finally {
+            Pop-Location
+          }
+      - name: Package
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          Compress-Archive -Path build/stage/bin, README.md `
+            -DestinationPath "WorkBoost-$version-msvc-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workboost-msvc-x64
+          path: WorkBoost-*.zip
+
+  mingw:
+    name: MinGW-w64 x64
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          cache: true
+          install: >-
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-ninja
+      - name: Configure, build, test, and install
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DWORKBOOST_BUILD_TESTS=ON
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          cmake --install build --prefix build/stage
+      - name: Installed CLI smoke
+        shell: pwsh
+        run: |
+          $smoke = (Resolve-Path "$env:GITHUB_WORKSPACE\tests\integration\installed_cli_smoke.ps1").Path
+          Push-Location build/stage
+          try {
+            & $smoke -BinDirectory (Resolve-Path .\bin).Path
+          } finally {
+            Pop-Location
+          }
+      - name: Package
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          Compress-Archive -Path build/stage/bin, README.md `
+            -DestinationPath "WorkBoost-$version-mingw-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workboost-mingw-x64
+          path: WorkBoost-*.zip
+
+  release:
+    name: Publish release
+    needs: [msvc, mingw]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --title "WorkBoost $tag" \
+              --generate-notes
+          fi
+          gh release upload "$tag" artifacts/*.zip --clobber
