@@ -1,3 +1,4 @@
+#include "app/coding_mode_command.h"
 #include "app/session_manager.h"
 #include "app/elevated_action_handler.h"
 #include "core/benchmark/benchmark.h"
@@ -9,6 +10,7 @@
 #include "core/policy/protection_policy.h"
 #include "core/policy/service_protection_policy.h"
 #include "gui/dashboard_model.h"
+#include "gui/dashboard_renderer.h"
 #include "platform/windows/service_api.h"
 #include "platform/windows/helper_pipe.h"
 #include "platform/windows/serial_port_api.h"
@@ -1112,12 +1114,69 @@ void TestDashboardPresenter() {
       config, snapshot, history, {}, {}, std::nullopt, "");
   Check(workboost::gui::DashboardPresenter::PageNames().size() == 7,
         "dashboard must expose all seven design pages");
+  Check(model.system.memory_used_bytes == 12ULL * 1024 * 1024 * 1024 &&
+            model.system.memory_total_bytes == 16ULL * 1024 * 1024 * 1024 &&
+            model.processes.size() == 1 &&
+            model.protected_workloads.size() == 1 &&
+            model.protected_workloads[0].reason ==
+                "Active protected remote session" &&
+            model.coding_mode.protected_workloads == 1,
+        "dashboard must expose typed real-core data for native rendering");
   const auto& protected_page =
       model.pages[static_cast<std::size_t>(
           workboost::gui::DashboardPage::ProtectedWorkload)];
   Check(protected_page.find("192.168.12.34") == std::string::npos &&
             protected_page.find("192.168.12.x") != std::string::npos,
         "dashboard must mask remote IP addresses by default");
+}
+
+void TestDashboardRendererHitTargets() {
+  HWND window = CreateWindowExW(0, L"STATIC", L"WorkBoost renderer test",
+                                WS_POPUP, 0, 0, 32, 32, nullptr, nullptr,
+                                GetModuleHandleW(nullptr), nullptr);
+  Check(window != nullptr, "renderer test window should be created");
+  struct Cleanup {
+    HWND window;
+    ~Cleanup() {
+      if (window != nullptr) DestroyWindow(window);
+    }
+  } cleanup{window};
+
+  workboost::gui::DashboardRenderer renderer;
+  Check(renderer.Initialize(window), "native dashboard renderer should initialize");
+  HDC dc = GetDC(window);
+  Check(dc != nullptr, "renderer test device context should be available");
+  const int dpi = std::max(96, GetDeviceCaps(dc, LOGPIXELSX));
+  const RECT bounds{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
+  workboost::gui::DashboardViewModel model;
+  model.mode = "Monitor Mode";
+  model.system.memory_total_bytes = 1;
+  const std::optional<workboost::gui::DashboardViewModel> optional_model{model};
+  renderer.Paint(dc, bounds, optional_model,
+                 workboost::gui::DashboardPage::Dashboard, std::nullopt, "");
+  ReleaseDC(window, dc);
+
+  const POINT process_navigation{MulDiv(50, dpi, 96),
+                                 MulDiv(150, dpi, 96)};
+  const auto command = renderer.HitTest(process_navigation);
+  Check(command &&
+            command->action == workboost::gui::DashboardUiAction::Navigate &&
+            command->page == workboost::gui::DashboardPage::Processes,
+        "custom sidebar must expose a stable Processes hit target");
+}
+
+void TestCodingModeCommandValidation() {
+  const auto below_minimum = workboost::CodingModeCommandClient::Execute(
+      workboost::CodingModeCommand::Enter, 9);
+  Check(!below_minimum.launched &&
+            below_minimum.error.code == ERROR_INVALID_PARAMETER,
+        "invalid Coding Mode baseline must fail before launching a process");
+
+  const auto above_maximum = workboost::CodingModeCommandClient::Execute(
+      workboost::CodingModeCommand::Enter, 601);
+  Check(!above_maximum.launched &&
+            above_maximum.error.code == ERROR_INVALID_PARAMETER,
+        "oversized Coding Mode baseline must fail before launching a process");
 }
 
 void TestCompletionReport() {
@@ -1765,6 +1824,8 @@ int main() {
       {"passive startup benchmark timeout",
        TestPassiveStartupBenchmarkTimeout},
       {"dashboard presenter", TestDashboardPresenter},
+      {"dashboard renderer hit targets", TestDashboardRendererHitTargets},
+      {"Coding Mode command validation", TestCodingModeCommandValidation},
       {"completion report", TestCompletionReport},
       {"diagnosis rules", TestDiagnosisRules},
       {"benchmark window aggregation", TestBenchmarkWindowAggregation},

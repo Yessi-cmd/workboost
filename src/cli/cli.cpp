@@ -1480,6 +1480,11 @@ int RunCli(int argc, char* argv[]) {
     PrintUsage();
     return 64;
   }
+  // The dashboard detaches from the console so it keeps running without a
+  // terminal window; one-shot CLI commands keep the console for their output.
+  const bool dashboard_invocation =
+      positional.empty() || positional[0] == "gui";
+  if (dashboard_invocation) FreeConsole();
   const auto data_directory = windows::LocalAppDataDirectory();
   std::string logger_error;
   if (!Logger::Instance().Initialize(data_directory, LogLevel::Info,

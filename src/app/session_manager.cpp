@@ -397,6 +397,60 @@ bool ValidServiceIdentity(const std::string& value) {
          });
 }
 
+std::optional<CompletionReportSummary> ParseCompletionReportSummary(
+    const std::string& json) {
+  const auto report_version = IntegerField(json, "report_schema_version");
+  const auto session_id = StringField(json, "session_id");
+  const auto state = StringField(json, "state");
+  const auto start_time = StringField(json, "start_time");
+  const auto measurement_phase = StringField(json, "measurement_phase");
+  const auto baseline = DelimitedField(json, "baseline", '{', '}');
+  const auto optimized = DelimitedField(json, "optimized", '{', '}');
+  const auto rollback = DelimitedField(json, "rollback", '{', '}');
+  const auto actions = ArrayBody(json, "actions");
+  if (!report_version || *report_version != 1 || !session_id || !state ||
+      *state != "Completed" || !start_time || !measurement_phase ||
+      !baseline || !optimized || !rollback || !actions) {
+    return std::nullopt;
+  }
+
+  const auto baseline_memory =
+      IntegerField(*baseline, "available_memory_bytes");
+  const auto optimized_memory =
+      IntegerField(*optimized, "available_memory_bytes");
+  const auto baseline_latency =
+      DoubleField(*baseline, "maximum_disk_latency_ms");
+  const auto optimized_latency =
+      DoubleField(*optimized, "maximum_disk_latency_ms");
+  const auto rollback_complete = BoolField(*rollback, "complete");
+  if (!baseline_memory || !optimized_memory || !baseline_latency ||
+      !optimized_latency || !rollback_complete) {
+    return std::nullopt;
+  }
+
+  CompletionReportSummary summary;
+  summary.session_id = *session_id;
+  summary.start_time = *start_time;
+  summary.measurement_phase = *measurement_phase;
+  summary.action_count = Objects(*actions).size();
+  summary.baseline_available_memory_bytes = *baseline_memory;
+  summary.optimized_available_memory_bytes = *optimized_memory;
+  summary.baseline_disk_latency_ms = *baseline_latency;
+  summary.optimized_disk_latency_ms = *optimized_latency;
+  summary.rollback_complete = *rollback_complete;
+
+  if (const auto diagnoses = ArrayBody(json, "diagnoses")) {
+    const auto items = Objects(*diagnoses);
+    if (!items.empty()) {
+      summary.primary_diagnosis =
+          StringField(items.front(), "type").value_or("");
+      summary.primary_severity =
+          StringField(items.front(), "severity").value_or("");
+    }
+  }
+  return summary;
+}
+
 }  // namespace
 
 SessionManager::SessionManager(std::filesystem::path root_directory)
@@ -443,6 +497,66 @@ std::optional<OptimizationSession> SessionManager::LoadActive(
   const auto content = windows::ReadUtf8(ActiveSessionPath(), error);
   if (!content) return std::nullopt;
   return Deserialize(*content, error);
+}
+
+std::vector<CompletionReportSummary> SessionManager::ListCompletionReports(
+    std::size_t limit, std::string* error) const {
+  if (error) error->clear();
+  std::vector<CompletionReportSummary> summaries;
+  if (limit == 0) return summaries;
+
+  const auto directory = root_directory_ / "reports";
+  std::error_code ec;
+  if (!std::filesystem::exists(directory, ec)) {
+    if (ec && error) *error = "cannot inspect the local reports directory";
+    return summaries;
+  }
+  if (!std::filesystem::is_directory(directory, ec) || ec) {
+    if (error) *error = "the local reports location is unavailable";
+    return summaries;
+  }
+
+  struct Candidate {
+    std::filesystem::path path;
+    std::filesystem::file_time_type modified;
+  };
+  std::vector<Candidate> candidates;
+  std::filesystem::directory_iterator iterator(directory, ec);
+  const std::filesystem::directory_iterator end;
+  while (!ec && iterator != end) {
+    std::error_code entry_error;
+    const auto& entry = *iterator;
+    if (entry.is_regular_file(entry_error) && !entry_error &&
+        entry.path().extension() == ".json") {
+      const auto modified = entry.last_write_time(entry_error);
+      if (!entry_error) candidates.push_back({entry.path(), modified});
+    }
+    iterator.increment(ec);
+  }
+  if (ec && error) *error = "the local reports directory is incomplete";
+  std::stable_sort(candidates.begin(), candidates.end(),
+                   [](const Candidate& left, const Candidate& right) {
+                     return left.modified > right.modified;
+                   });
+
+  std::size_t skipped = 0;
+  for (const auto& candidate : candidates) {
+    if (summaries.size() >= limit) break;
+    std::string read_error;
+    const auto content = windows::ReadUtf8(candidate.path, &read_error);
+    const auto summary =
+        content ? ParseCompletionReportSummary(*content) : std::nullopt;
+    if (summary) {
+      summaries.push_back(*summary);
+    } else {
+      ++skipped;
+    }
+  }
+  if (skipped != 0 && error && error->empty()) {
+    *error = std::to_string(skipped) +
+             " local report(s) could not be validated and were omitted";
+  }
+  return summaries;
 }
 
 bool SessionManager::Complete(OptimizationSession session,

@@ -35,6 +35,7 @@ function(workboost_enable_standalone_runtime target)
 endfunction()
 
 add_library(workboost_core
+  src/app/coding_mode_command.cpp
   src/app/elevated_action_handler.cpp
   src/app/session_manager.cpp
   src/core/benchmark/benchmark.cpp
@@ -83,12 +84,13 @@ workboost_enable_warnings(workboost_core)
 
 add_library(workboost_dashboard_model
   src/gui/dashboard_model.cpp
+  src/gui/dashboard_renderer.cpp
 )
 target_include_directories(workboost_dashboard_model PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 target_compile_features(workboost_dashboard_model PUBLIC cxx_std_17)
-target_link_libraries(workboost_dashboard_model PUBLIC workboost_core)
+target_link_libraries(workboost_dashboard_model PUBLIC workboost_core gdi32)
 workboost_enable_warnings(workboost_dashboard_model)
 
 add_executable(workboost
@@ -96,6 +98,11 @@ add_executable(workboost
   src/cli/cli.cpp
   src/gui/dashboard.cpp
 )
+# Both executables stay on the console subsystem on purpose: PowerShell and
+# cmd capture stdout and wait for exit only for console-subsystem processes,
+# which the CLI commands and the installed-CLI CI smoke test depend on. The
+# dashboard instead calls FreeConsole() at startup (see cli.cpp) so it runs
+# without a terminal window and can keep living in the system tray.
 target_link_libraries(workboost PRIVATE
   workboost_core
   workboost_dashboard_model

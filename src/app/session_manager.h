@@ -45,6 +45,20 @@ struct OptimizationSession {
   std::vector<ExecutedAction> actions;
 };
 
+struct CompletionReportSummary {
+  std::string session_id;
+  std::string start_time;
+  std::string measurement_phase;
+  std::string primary_diagnosis;
+  std::string primary_severity;
+  std::size_t action_count{};
+  std::uint64_t baseline_available_memory_bytes{};
+  std::uint64_t optimized_available_memory_bytes{};
+  double baseline_disk_latency_ms{};
+  double optimized_disk_latency_ms{};
+  bool rollback_complete{};
+};
+
 class SessionManager {
  public:
   explicit SessionManager(std::filesystem::path root_directory);
@@ -59,6 +73,8 @@ class SessionManager {
   bool Save(const OptimizationSession& session, std::string* error = nullptr) const;
   std::optional<OptimizationSession> LoadActive(
       std::string* error = nullptr) const;
+  [[nodiscard]] std::vector<CompletionReportSummary> ListCompletionReports(
+      std::size_t limit = 20, std::string* error = nullptr) const;
   bool Complete(OptimizationSession session, const SystemSnapshot& after,
                 const std::vector<DiagnosisResult>& diagnoses,
                 const std::string& measurement_phase,

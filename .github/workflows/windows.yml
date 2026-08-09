@@ -1,15 +1,34 @@
-name: Windows build
+name: Windows CI
 
 on:
   push:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
   pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: windows-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: pwsh
+
 jobs:
   msvc:
+    name: MSVC 2022
     runs-on: windows-2022
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Configure
@@ -32,13 +51,16 @@ jobs:
           }
 
   mingw:
+    name: MinGW-w64
     runs-on: windows-2022
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
+          update: false
+          cache: true
           install: >-
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-gcc

@@ -84,6 +84,120 @@ std::vector<const ProcessSnapshot*> SortedProcesses(
   return processes;
 }
 
+ImpactLevel ProcessImpact(const Config& config,
+                          const ProcessSnapshot& process) {
+  const double io = process.IoBytesPerSec();
+  const double high_io =
+      std::max(1.0, config.thresholds.background_io_bytes_per_sec * 2.0);
+  const double medium_io = high_io * 0.25;
+  if (io >= high_io || process.cpu_percent >= 20.0 ||
+      process.private_bytes >= 2ULL * 1024 * 1024 * 1024) {
+    return ImpactLevel::High;
+  }
+  if (io >= medium_io || process.cpu_percent >= 5.0 ||
+      process.private_bytes >= 512ULL * 1024 * 1024) {
+    return ImpactLevel::Medium;
+  }
+  return ImpactLevel::Low;
+}
+
+std::string WorkloadCategory(ProcessClass value) {
+  switch (value) {
+    case ProcessClass::RemoteTerminal: return "Remote";
+    case ProcessClass::SerialTerminal: return "Serial";
+    case ProcessClass::PacketCapture: return "Packet capture";
+    case ProcessClass::Development: return "Development";
+    case ProcessClass::BuildTool: return "Build";
+    case ProcessClass::VersionControl: return "Version control";
+    default: return "Protected";
+  }
+}
+
+std::string ProtectionReason(const Config& config,
+                             const ProcessSnapshot& process,
+                             const RuntimeContext& context) {
+  if (context.remote_session_pids.count(process.pid) != 0) {
+    return "Active protected remote session";
+  }
+  if (context.active_capture_pids.count(process.pid) != 0) {
+    return "Packet capture is running";
+  }
+  if (config.IsAlwaysProtected(process.name)) {
+    return "Always Protect profile";
+  }
+  switch (process.classification) {
+    case ProcessClass::RemoteTerminal: return "Known remote terminal";
+    case ProcessClass::SerialTerminal: return "Known serial terminal";
+    case ProcessClass::PacketCapture: return "Known packet-capture tool";
+    case ProcessClass::Development: return "Development workload";
+    case ProcessClass::BuildTool: return "Build task";
+    case ProcessClass::VersionControl: return "Version-control task";
+    default: return "Fail-closed protection policy";
+  }
+}
+
+std::string DiagnosisTitle(const std::string& type) {
+  if (type == "MemoryPressure") return "Memory Pressure";
+  if (type == "PagingPressure") return "Paging Pressure";
+  if (type == "DiskBottleneck") return "Disk I/O Bottleneck";
+  if (type == "HddPagingBottleneck") return "HDD Paging Bottleneck";
+  if (type == "SsdSpacePressure") return "SSD Space Pressure";
+  if (type == "CpuSaturation") return "CPU Saturation";
+  if (type == "DefenderImpact") return "Windows Defender Impact";
+  if (type == "BackgroundIoImpact") return "Background I/O Impact";
+  if (type == "ForegroundAppMemoryPressure") {
+    return "Foreground App Memory Pressure";
+  }
+  return type;
+}
+
+CodingActionViewModel ActionView(const OptimizationAction& action,
+                                 const std::string& state) {
+  CodingActionViewModel view;
+  view.target = !action.process_name.empty() ? action.process_name
+                                             : action.service_name;
+  if (view.target.empty()) view.target = "System";
+  switch (action.type) {
+    case ActionType::SetPriorityClass:
+      view.action = "Priority";
+      view.change = PriorityName(action.source_priority) + " -> " +
+                    PriorityName(action.target_priority);
+      break;
+    case ActionType::GracefulCloseProcess:
+      view.action = "Close application";
+      view.change = "Request WM_CLOSE; never terminate";
+      break;
+    case ActionType::StopServiceTemporary:
+      view.action = "Temporary service stop";
+      view.change = ToString(action.source_service_state) + " -> Stopped";
+      break;
+    default:
+      view.action = ToString(action.type);
+      view.change = "Validated application action";
+      break;
+  }
+  view.risk = ToString(action.risk);
+  view.state = state;
+  view.reason = action.reason;
+  return view;
+}
+
+std::vector<std::string> SortedStrings(
+    const std::unordered_set<std::string>& values) {
+  std::vector<std::string> result(values.begin(), values.end());
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+bool IsDeveloperWorkload(ProcessClass value) {
+  return value == ProcessClass::Development ||
+         value == ProcessClass::RemoteTerminal ||
+         value == ProcessClass::SerialTerminal ||
+         value == ProcessClass::PacketCapture ||
+         value == ProcessClass::BuildTool ||
+         value == ProcessClass::VersionControl;
+}
+
 std::string StartupRecommendation(const StartupEntrySnapshot& entry,
                                   const Config& config) {
   if (entry.executable_name.empty()) return "MonitorOnly";
@@ -193,9 +307,8 @@ std::string BuildProcesses(const SystemSnapshot& snapshot) {
   return output.str();
 }
 
-std::string BuildDiagnosis(const Config& config,
+std::string BuildDiagnosis(const std::vector<DiagnosisResult>& diagnoses,
                            const SnapshotHistory& history) {
-  const auto diagnoses = DiagnosisEngine(config).Evaluate(history);
   const auto& snapshots = history.Snapshots();
   const auto process_complete = std::count_if(
       snapshots.begin(), snapshots.end(), [](const auto& snapshot) {
@@ -234,16 +347,14 @@ std::string BuildDiagnosis(const Config& config,
   return output.str();
 }
 
-std::string BuildCodingMode(const Config& config,
-                            const SystemSnapshot& snapshot,
+std::string BuildCodingMode(const OptimizationPlan& plan,
                             const std::optional<OptimizationSession>& session) {
-  const auto plan = OptimizationPlanner(config).Create(snapshot);
   std::ostringstream output;
   output << "CODING MODE\r\n"
          << "State: " << (session ? ToString(session->state) : "Inactive")
          << "\r\n"
-         << "This page is a live, read-only plan preview. System changes still "
-            "require the typed CLI action path.\r\n\r\n"
+         << "GUI operations use the same typed application command, policy, "
+            "validation, persistence, and rollback path as the CLI.\r\n\r\n"
          << "PLANNED ACTIONS " << plan.actions.size() << "\r\n";
   if (plan.actions.empty()) output << "No eligible actions.\r\n";
   for (const auto& action : plan.actions) {
@@ -341,7 +452,9 @@ std::string BuildProtected(
 
 std::string BuildRecovery(
     const std::optional<OptimizationSession>& active_session,
-    const std::string& recovery_error) {
+    const std::string& recovery_error,
+    const std::vector<CompletionReportSummary>& reports,
+    const std::string& report_error) {
   std::ostringstream output;
   output << "RECOVERY\r\n\r\n";
   if (!recovery_error.empty()) {
@@ -349,27 +462,36 @@ std::string BuildRecovery(
            << "The active session could not be validated: "
            << recovery_error << "\r\n"
            << "No new system changes are allowed.\r\n";
-    return output.str();
-  }
-  if (!active_session) {
+  } else if (!active_session) {
     output << "Recovery not required. No unfinished Coding Mode session was "
               "found.\r\n";
-    return output.str();
+  } else {
+    output << "Recovery required\r\n"
+           << "Session: " << active_session->session_id << "\r\n"
+           << "State: " << ToString(active_session->state) << "\r\n"
+           << "Started: " << active_session->start_time << "\r\n"
+           << "Recorded actions: " << active_session->actions.size()
+           << "\r\n\r\n";
+    for (const auto& action : active_session->actions) {
+      output << ToString(action.state) << "  "
+             << ToString(action.action.type) << "  " << action.action.id
+             << "\r\n";
+    }
+    output << "\r\nCommands:\r\n"
+           << "  workboost recovery status\r\n"
+           << "  workboost recovery restore\r\n"
+           << "  workboost recovery acknowledge\r\n";
   }
-  output << "Recovery required\r\n"
-         << "Session: " << active_session->session_id << "\r\n"
-         << "State: " << ToString(active_session->state) << "\r\n"
-         << "Started: " << active_session->start_time << "\r\n"
-         << "Recorded actions: " << active_session->actions.size()
-         << "\r\n\r\n";
-  for (const auto& action : active_session->actions) {
-    output << ToString(action.state) << "  " << ToString(action.action.type)
-           << "  " << action.action.id << "\r\n";
+  output << "\r\nHISTORY " << reports.size() << "\r\n";
+  if (!report_error.empty()) output << "History warning: " << report_error << "\r\n";
+  for (const auto& report : reports) {
+    output << report.start_time << "  " << report.session_id << "  "
+           << report.measurement_phase << "  actions=" << report.action_count;
+    if (!report.primary_diagnosis.empty()) {
+      output << "  diagnosis=" << report.primary_diagnosis;
+    }
+    output << "\r\n";
   }
-  output << "\r\nCommands:\r\n"
-         << "  workboost recovery status\r\n"
-         << "  workboost recovery restore\r\n"
-         << "  workboost recovery acknowledge\r\n";
   return output.str();
 }
 
@@ -418,7 +540,7 @@ const std::array<const char*, kDashboardPageCount>&
 DashboardPresenter::PageNames() {
   static const std::array<const char*, kDashboardPageCount> names{
       "Dashboard", "Processes", "Diagnosis", "Coding Mode",
-      "Protected Workload", "Recovery", "Settings"};
+      "Protected Workload", "Recovery & History", "Settings"};
   return names;
 }
 
@@ -429,25 +551,211 @@ DashboardViewModel DashboardPresenter::Build(
     const std::vector<StartupEntrySnapshot>& startup_entries,
     const std::optional<OptimizationSession>& active_session,
     const std::string& recovery_error, const std::string& serial_error,
-    const std::string& startup_error) {
+    const std::string& startup_error,
+    const std::vector<CompletionReportSummary>& reports,
+    const std::string& report_error) {
   DashboardViewModel model;
+  const auto diagnoses = DiagnosisEngine(config).Evaluate(history);
+  const auto plan = OptimizationPlanner(config).Create(snapshot);
+  const RuntimeContext context =
+      BuildRuntimeContext(snapshot, config.remote_debug_ports);
+  const ProtectionPolicy policy(config);
   model.mode = !recovery_error.empty()
                    ? "Safe Mode"
                    : active_session ? ToString(active_session->state)
                                     : "Monitor Mode";
   model.updated_at = windows::Iso8601Now();
+  model.system.cpu_percent = snapshot.cpu_percent;
+  model.system.memory_total_bytes = snapshot.memory.physical_total_bytes;
+  model.system.available_memory_bytes =
+      snapshot.memory.physical_available_bytes;
+  model.system.memory_used_bytes =
+      snapshot.memory.physical_total_bytes >=
+              snapshot.memory.physical_available_bytes
+          ? snapshot.memory.physical_total_bytes -
+                snapshot.memory.physical_available_bytes
+          : 0;
+  model.system.memory_used_ratio =
+      snapshot.memory.physical_total_bytes == 0
+          ? 0.0
+          : static_cast<double>(model.system.memory_used_bytes) /
+                static_cast<double>(snapshot.memory.physical_total_bytes);
+  model.system.commit_ratio = snapshot.memory.CommitRatio();
+  model.system.page_reads_per_sec = snapshot.page_reads_per_sec;
+  model.system.process_inventory_complete =
+      snapshot.process_inventory_complete;
+  model.system.tcp_inventory_complete = snapshot.tcp_inventory_complete;
+  for (const auto& disk : snapshot.disks) {
+    DiskViewModel view;
+    view.name = disk.volumes.empty() ? disk.instance : disk.volumes;
+    view.media = ToString(disk.media);
+    view.active_percent = disk.active_ratio * 100.0;
+    view.latency_ms = disk.average_latency_ms;
+    view.queue_length = disk.queue_length;
+    view.throughput_bytes_per_sec =
+        disk.read_bytes_per_sec + disk.write_bytes_per_sec;
+    model.disks.push_back(std::move(view));
+  }
+  for (const auto& diagnosis : diagnoses) {
+    DiagnosisViewModel view;
+    view.severity = ToString(diagnosis.severity);
+    view.confidence = ToString(diagnosis.confidence);
+    view.type = DiagnosisTitle(diagnosis.type);
+    view.summary = diagnosis.summary;
+    for (const auto& [name, value] : diagnosis.evidence) {
+      view.evidence.emplace_back(name, EvidenceValueText(value));
+    }
+    model.diagnoses.push_back(std::move(view));
+  }
+  const auto sorted_processes = SortedProcesses(snapshot);
+  const std::size_t process_count =
+      std::min<std::size_t>(200, sorted_processes.size());
+  for (std::size_t i = 0; i < process_count; ++i) {
+    const auto& process = *sorted_processes[i];
+    ProcessViewModel view;
+    view.pid = process.pid;
+    view.name = process.name;
+    view.cpu_percent = process.cpu_percent;
+    view.working_set_bytes = process.working_set_bytes;
+    view.private_bytes = process.private_bytes;
+    view.read_bytes_per_sec = process.read_bytes_per_sec;
+    view.write_bytes_per_sec = process.write_bytes_per_sec;
+    view.process_class = ToString(process.classification);
+    view.protection = ToString(policy.Evaluate(process, context));
+    view.impact = ProcessImpact(config, process);
+    view.protected_workload = policy.IsProtected(process, context);
+    model.processes.push_back(std::move(view));
+
+    if (!IsDeveloperWorkload(process.classification) &&
+        context.remote_session_pids.count(process.pid) == 0 &&
+        context.active_capture_pids.count(process.pid) == 0 &&
+        !config.IsAlwaysProtected(process.name)) {
+      continue;
+    }
+    ProtectedWorkloadViewModel workload;
+    workload.category = WorkloadCategory(process.classification);
+    workload.name = process.name;
+    workload.detail = "PID " + std::to_string(process.pid);
+    for (const auto& session : snapshot.tcp_sessions) {
+      if (session.pid == process.pid && session.state == TcpState::Established &&
+          config.remote_debug_ports.count(session.remote_port) != 0) {
+        workload.detail += "  " + windows::MaskIpAddress(session.remote_address) +
+                           ":" + std::to_string(session.remote_port);
+        break;
+      }
+    }
+    workload.reason = ProtectionReason(config, process, context);
+    model.protected_workloads.push_back(std::move(workload));
+  }
+  for (const auto& workload : model.protected_workloads) {
+    model.coding_mode.protected_processes.push_back(workload.name);
+  }
+  std::sort(model.coding_mode.protected_processes.begin(),
+            model.coding_mode.protected_processes.end());
+  model.coding_mode.protected_processes.erase(
+      std::unique(model.coding_mode.protected_processes.begin(),
+                  model.coding_mode.protected_processes.end()),
+      model.coding_mode.protected_processes.end());
+  model.coding_mode.active = active_session.has_value();
+  model.coding_mode.safe_mode = !recovery_error.empty();
+  model.coding_mode.state = model.mode;
+  model.coding_mode.started_at =
+      active_session ? active_session->start_time : std::string{};
+  model.coding_mode.planned_actions = plan.actions.size();
+  model.coding_mode.rejected_actions = plan.rejected.size();
+  model.coding_mode.protected_workloads = model.protected_workloads.size();
+  if (active_session) {
+    model.coding_mode.active_actions =
+        static_cast<std::size_t>(std::count_if(
+            active_session->actions.begin(), active_session->actions.end(),
+            [](const ExecutedAction& action) {
+              return action.state == ActionState::Applied ||
+                     action.state == ActionState::Completed;
+            }));
+    for (const auto& action : active_session->actions) {
+      model.coding_mode.actions.push_back(
+          ActionView(action.action, ToString(action.state)));
+    }
+  } else {
+    for (const auto& action : plan.actions) {
+      model.coding_mode.actions.push_back(ActionView(action, "Planned"));
+    }
+  }
+
+  model.recovery.required =
+      !recovery_error.empty() || active_session.has_value();
+  model.recovery.can_restore = active_session.has_value();
+  model.recovery.state = model.mode;
+  model.recovery.error = recovery_error;
+  model.recovery.report_error = report_error;
+  if (active_session) {
+    model.recovery.session_id = active_session->session_id;
+    model.recovery.started_at = active_session->start_time;
+    for (const auto& action : active_session->actions) {
+      model.recovery.actions.push_back(
+          ActionView(action.action, ToString(action.state)));
+    }
+  }
+  for (const auto& report : reports) {
+    HistoryReportViewModel view;
+    view.session_id = report.session_id;
+    view.started_at = report.start_time;
+    view.measurement_phase = report.measurement_phase;
+    view.primary_diagnosis = DiagnosisTitle(report.primary_diagnosis);
+    view.primary_severity = report.primary_severity;
+    view.action_count = report.action_count;
+    view.baseline_available_memory_bytes =
+        report.baseline_available_memory_bytes;
+    view.optimized_available_memory_bytes =
+        report.optimized_available_memory_bytes;
+    view.baseline_disk_latency_ms = report.baseline_disk_latency_ms;
+    view.optimized_disk_latency_ms = report.optimized_disk_latency_ms;
+    view.rollback_complete = report.rollback_complete;
+    model.recovery.reports.push_back(std::move(view));
+  }
+
+  model.settings.sample_interval_ms = config.sample_interval_ms;
+  model.settings.history_seconds = config.history_seconds;
+  model.settings.process_rule_count = config.process_rules.size();
+  model.settings.service_rule_count = config.service_rules.size();
+  model.settings.remote_debug_ports.assign(config.remote_debug_ports.begin(),
+                                           config.remote_debug_ports.end());
+  std::sort(model.settings.remote_debug_ports.begin(),
+            model.settings.remote_debug_ports.end());
+  model.settings.always_protect =
+      SortedStrings(config.coding_profile.always_protect);
+  model.settings.allow_graceful_close =
+      SortedStrings(config.coding_profile.allow_graceful_close);
+  model.settings.allow_service_stop =
+      SortedStrings(config.coding_profile.allow_service_stop);
+  model.settings.commit_warning_percent =
+      config.thresholds.commit_warning * 100.0;
+  model.settings.available_memory_mb =
+      config.thresholds.available_memory_mb;
+  model.settings.disk_active_percent =
+      config.thresholds.disk_active_ratio * 100.0;
+  model.settings.hdd_latency_ms = config.thresholds.hdd_latency_ms;
+  model.settings.startup_error = startup_error;
+  for (const auto& entry : startup_entries) {
+    StartupEntryViewModel view;
+    view.name = entry.name;
+    view.executable_name = entry.executable_name;
+    view.scope = ToString(entry.scope);
+    view.recommendation = StartupRecommendation(entry, config);
+    model.settings.startup_entries.push_back(std::move(view));
+  }
   model.pages[static_cast<std::size_t>(DashboardPage::Dashboard)] =
       BuildDashboard(snapshot);
   model.pages[static_cast<std::size_t>(DashboardPage::Processes)] =
       BuildProcesses(snapshot);
   model.pages[static_cast<std::size_t>(DashboardPage::Diagnosis)] =
-      BuildDiagnosis(config, history);
+      BuildDiagnosis(diagnoses, history);
   model.pages[static_cast<std::size_t>(DashboardPage::CodingMode)] =
-      BuildCodingMode(config, snapshot, active_session);
+      BuildCodingMode(plan, active_session);
   model.pages[static_cast<std::size_t>(DashboardPage::ProtectedWorkload)] =
       BuildProtected(config, snapshot, serial_ports, serial_error);
   model.pages[static_cast<std::size_t>(DashboardPage::Recovery)] =
-      BuildRecovery(active_session, recovery_error);
+      BuildRecovery(active_session, recovery_error, reports, report_error);
   model.pages[static_cast<std::size_t>(DashboardPage::Settings)] =
       BuildSettings(config, startup_entries, startup_error);
   return model;
