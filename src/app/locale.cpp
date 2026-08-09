@@ -49,7 +49,7 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
         {"Top Impact", "高影响进程"},
         {"CPU", "CPU"},
         {"Memory", "内存"},
-        {"Commit", "提交"},
+        {"Commit", "提交内存"},
         {"{0} available", "{0} 可用"},
         {"{0} page reads/s", "{0} 页读取/秒"},
         {"No physical disk counters available", "无物理磁盘计数器"},

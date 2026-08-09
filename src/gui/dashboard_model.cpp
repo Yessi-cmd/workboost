@@ -57,6 +57,14 @@ std::vector<std::string> SplitVolumeNames(const std::string& volumes) {
   return result;
 }
 
+int DiskSortRank(const std::string& name) {
+  if (name.size() == 2 &&
+      std::isalpha(static_cast<unsigned char>(name[0])) && name[1] == ':') {
+    return std::toupper(static_cast<unsigned char>(name[0]));
+  }
+  return 256;
+}
+
 std::string InventoryState(bool complete) {
   return complete ? "complete" : "partial";
 }
@@ -624,6 +632,14 @@ DashboardViewModel DashboardPresenter::Build(
       model.disks.push_back(std::move(view));
     }
   }
+  std::stable_sort(
+      model.disks.begin(), model.disks.end(),
+      [](const DiskViewModel& left, const DiskViewModel& right) {
+        const int left_rank = DiskSortRank(left.name);
+        const int right_rank = DiskSortRank(right.name);
+        if (left_rank != right_rank) return left_rank < right_rank;
+        return left.name < right.name;
+      });
   for (const auto& diagnosis : diagnoses) {
     DiagnosisViewModel view;
     view.severity = ToString(diagnosis.severity);

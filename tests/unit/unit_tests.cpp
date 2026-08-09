@@ -1117,6 +1117,9 @@ void TestDashboardPresenter() {
   snapshot.disks.push_back(workboost::DiskSnapshot{
       "1 E:", "E:", workboost::DiskMedia::HDD, 0.5, 0.012, 0.0, 0.0,
       0.0, 0.0, 0.0, 0, 0, false});
+  snapshot.disks.push_back(workboost::DiskSnapshot{
+      "0 F:", "F:", workboost::DiskMedia::HDD, 0.1, 0.008, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0, 0, false});
   SnapshotHistory history(4);
   history.Add(snapshot);
   const auto model = workboost::gui::DashboardPresenter::Build(
@@ -1126,8 +1129,9 @@ void TestDashboardPresenter() {
   Check(model.system.memory_used_bytes == 12ULL * 1024 * 1024 * 1024 &&
             model.system.memory_total_bytes == 16ULL * 1024 * 1024 * 1024 &&
             model.processes.size() == 1 &&
-            model.disks.size() == 3 && model.disks[0].name == "C:" &&
+            model.disks.size() == 4 && model.disks[0].name == "C:" &&
             model.disks[1].name == "D:" && model.disks[2].name == "E:" &&
+            model.disks[3].name == "F:" &&
             model.protected_workloads.size() == 1 &&
             model.protected_workloads[0].reason ==
                 "Active protected remote session" &&
@@ -1849,6 +1853,8 @@ void TestLocale() {
   Locale::Set(LocaleId::Chinese);
   Check(Locale::Get("Dashboard") == "仪表盘",
         "Chinese locale must translate known keys");
+  Check(Locale::Get("Commit") == "提交内存",
+        "Chinese locale must clarify the committed-memory metric");
   Check(!Locale::Get("Settings").empty(),
         "Chinese settings label must be non-empty");
   Check(Locale::Format("{0} planned changes", {"5"}) == "5 项计划变更",

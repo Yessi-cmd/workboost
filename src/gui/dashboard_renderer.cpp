@@ -473,8 +473,8 @@ void DashboardRenderer::DrawDashboard(
   const int coding_height = Scale(92);
   const int available =
       std::max(Scale(320), Height(content) - coding_height - gap * 2);
-  const int row_height = Scale(30);
-  const int subtitle_height = Scale(12);
+  const int row_height = Scale(32);
+  const int subtitle_height = Scale(16);
   const int disk_row_count = static_cast<int>(std::max<std::size_t>(
       1, model.disks.size()));
   const int required_top_height =
