@@ -38,6 +38,8 @@ struct SystemOverviewViewModel {
   std::uint64_t available_memory_bytes{};
   double commit_ratio{};
   double page_reads_per_sec{};
+  std::string cpu_model;
+  std::string memory_model;
   bool process_inventory_complete{};
   bool tcp_inventory_complete{};
 };

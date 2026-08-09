@@ -1,5 +1,6 @@
 #include "gui/dashboard_renderer.h"
 
+#include "app/locale.h"
 #include "platform/windows/windows_utils.h"
 
 #include <algorithm>
@@ -218,6 +219,8 @@ bool DashboardRenderer::Initialize(HWND window) {
          mono_font_ != nullptr;
 }
 
+void DashboardRenderer::NotifyLocaleChanged() { RecreateFonts(dpi_); }
+
 void DashboardRenderer::RecreateFonts(int dpi) {
   for (HFONT* font : {&brand_font_, &page_title_font_, &section_font_,
                       &body_font_, &small_font_, &metric_font_, &mono_font_}) {
@@ -232,11 +235,16 @@ void DashboardRenderer::RecreateFonts(int dpi) {
                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
                        family);
   };
-  brand_font_ = create(17, FW_SEMIBOLD, L"Segoe UI");
-  page_title_font_ = create(21, FW_SEMIBOLD, L"Segoe UI");
-  section_font_ = create(12, FW_SEMIBOLD, L"Segoe UI");
-  body_font_ = create(10, FW_NORMAL, L"Segoe UI");
-  small_font_ = create(9, FW_NORMAL, L"Segoe UI");
+  // Segoe UI has no CJK glyphs; use Microsoft YaHei UI for the text fonts when
+  // the interface language is Chinese. Metric/mono stay Consolas (numbers and
+  // the English text pages).
+  const wchar_t* text_family =
+      Locale::IsChinese() ? L"Microsoft YaHei UI" : L"Segoe UI";
+  brand_font_ = create(17, FW_SEMIBOLD, text_family);
+  page_title_font_ = create(21, FW_SEMIBOLD, text_family);
+  section_font_ = create(12, FW_SEMIBOLD, text_family);
+  body_font_ = create(10, FW_NORMAL, text_family);
+  small_font_ = create(9, FW_NORMAL, text_family);
   metric_font_ = create(11, FW_SEMIBOLD, L"Consolas");
   mono_font_ = create(9, FW_NORMAL, L"Consolas");
 }
@@ -310,7 +318,7 @@ void DashboardRenderer::DrawFrame(
            MakeRect(Scale(24), Scale(18), sidebar_width - Scale(16),
                     Scale(48)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-  DrawUtf8(dc, small_font_, kSecondaryText, "Developer performance",
+  DrawUtf8(dc, small_font_, kSecondaryText, Locale::Get("Developer performance"),
            MakeRect(Scale(24), Scale(45), sidebar_width - Scale(16),
                     Scale(66)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -354,7 +362,7 @@ void DashboardRenderer::DrawFrame(
     }
     DrawUtf8(dc, body_font_,
              pages[index] == current_page ? kPrimaryText : kSecondaryText,
-             names[index],
+             Locale::Get(names[index]),
              MakeRect(item.left + Scale(38), item.top, item.right - Scale(8),
                       item.bottom),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -363,7 +371,8 @@ void DashboardRenderer::DrawFrame(
   }
 
   const std::size_t page_index = static_cast<std::size_t>(current_page);
-  DrawUtf8(dc, page_title_font_, kPrimaryText, names[page_index],
+  DrawUtf8(dc, page_title_font_, kPrimaryText,
+           Locale::Get(names[page_index]),
            MakeRect(sidebar_width + margin, Scale(16),
                     sidebar_width + margin + Scale(300), header_height),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -381,7 +390,7 @@ void DashboardRenderer::DrawFrame(
               MakeRect(mode_pill.left + Scale(12), mode_pill.top + Scale(13),
                        mode_pill.left + Scale(20), mode_pill.top + Scale(21)),
               mode_color);
-  DrawUtf8(dc, small_font_, kPrimaryText, mode,
+  DrawUtf8(dc, small_font_, kPrimaryText, Locale::Get(mode),
            MakeRect(mode_pill.left + Scale(27), mode_pill.top,
                     mode_pill.right - Scale(8), mode_pill.bottom),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -405,7 +414,7 @@ void DashboardRenderer::DrawFrame(
                      IsHovered(hovered, command) ? RGB(245, 247, 250)
                                                  : kSurface,
                      kBorder, Scale(5));
-    DrawUtf8(dc, small_font_, kPrimaryText, label, bounds,
+    DrawUtf8(dc, small_font_, kPrimaryText, Locale::Get(label), bounds,
              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     AddTarget(bounds, command);
   }
@@ -417,13 +426,16 @@ void DashboardRenderer::DrawFrame(
     content.right = content.left + maximum_content_width;
   }
   if (!model) {
-    DrawUtf8(dc, section_font_, kPrimaryText, "Collecting system metrics...",
+    DrawUtf8(dc, section_font_, kPrimaryText,
+             Locale::Get("Collecting system metrics..."),
              MakeRect(content.left, content.top, content.right,
                       content.top + Scale(28)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawUtf8(dc, body_font_, kSecondaryText,
-             status_message.empty() ? "The first sample normally takes about one second."
-                                    : status_message,
+             status_message.empty()
+                 ? Locale::Get(
+                       "The first sample normally takes about one second.")
+                 : status_message,
              MakeRect(content.left, content.top + Scale(36), content.right,
                       content.top + Scale(68)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -447,7 +459,9 @@ void DashboardRenderer::DrawFrame(
     case DashboardPage::Recovery:
       DrawRecovery(dc, content, *model, hovered);
       break;
-    case DashboardPage::Settings: DrawSettings(dc, content, *model); break;
+    case DashboardPage::Settings:
+      DrawSettings(dc, content, *model, hovered);
+      break;
     case DashboardPage::Count: break;
   }
 }
@@ -487,29 +501,33 @@ void DashboardRenderer::DrawDashboard(
   }
 
   const int panel_margin = Scale(16);
-  DrawUtf8(dc, section_font_, kPrimaryText, "System Overview",
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("System Overview"),
            MakeRect(system_panel.left + panel_margin,
                     system_panel.top + Scale(10), system_panel.right,
                     system_panel.top + Scale(38)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   const int label_width = Scale(72);
   const int value_width = Scale(160);
-  const int row_height = Scale(34);
+  const int row_height = Scale(32);
+  const int subtitle_height = Scale(14);
   int row_y = system_panel.top + Scale(44);
   auto draw_metric = [&](const std::string& label, double ratio,
-                         const std::string& value,
-                         const std::string& detail) {
-    DrawUtf8(dc, body_font_, kPrimaryText, label,
-             MakeRect(system_panel.left + panel_margin, row_y,
+                         const std::string& value, const std::string& detail,
+                         const std::string& subtitle) {
+    const int row_top = row_y;
+    DrawUtf8(dc, body_font_, kPrimaryText, Locale::Get(label),
+             MakeRect(system_panel.left + panel_margin, row_top,
                       system_panel.left + panel_margin + label_width,
-                      row_y + row_height),
-             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                      row_top + (subtitle.empty() ? row_height : Scale(18))),
+             subtitle.empty()
+                 ? DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
+                 : DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
     const int bar_left = system_panel.left + panel_margin + label_width;
     const int bar_right =
         std::max(bar_left + Scale(32),
                  static_cast<int>(system_panel.right) - panel_margin -
                      value_width);
-    const int bar_y = row_y + Scale(15);
+    const int bar_y = row_top + Scale(15);
     const RECT track = MakeRect(bar_left, bar_y, bar_right, bar_y + Scale(5));
     RoundedRectangle(dc, track, kTrack, kTrack, Scale(3));
     RECT progress = track;
@@ -524,47 +542,62 @@ void DashboardRenderer::DrawDashboard(
                        Scale(3));
     }
     DrawUtf8(dc, metric_font_, kPrimaryText, value,
-             MakeRect(bar_right + Scale(10), row_y,
-                      system_panel.right - panel_margin, row_y + Scale(20)),
+             MakeRect(bar_right + Scale(10), row_top,
+                      system_panel.right - panel_margin, row_top + Scale(20)),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (!detail.empty()) {
       DrawUtf8(dc, small_font_, kSecondaryText, detail,
-               MakeRect(bar_right + Scale(10), row_y + Scale(17),
+               MakeRect(bar_right + Scale(10), row_top + Scale(17),
                         system_panel.right - panel_margin,
-                        row_y + row_height),
+                        row_top + row_height),
                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    row_y += row_height;
+    // Model label sits directly under its row, left of the value column.
+    if (!subtitle.empty()) {
+      DrawUtf8(dc, small_font_, kSecondaryText, subtitle,
+               MakeRect(system_panel.left + panel_margin,
+                        row_top + row_height, bar_right,
+                        row_top + row_height + subtitle_height),
+               DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    row_y += subtitle.empty() ? row_height : row_height + subtitle_height;
   };
   draw_metric("CPU", model.system.cpu_percent / 100.0,
-              FormatPercent(model.system.cpu_percent), std::string{});
+              FormatPercent(model.system.cpu_percent), std::string{},
+              model.system.cpu_model);
   draw_metric("Memory", model.system.memory_used_ratio,
               FormatBytes(static_cast<double>(model.system.memory_used_bytes)) +
                   " / " +
                   FormatBytes(
                       static_cast<double>(model.system.memory_total_bytes)),
-              FormatBytes(static_cast<double>(
-                  model.system.available_memory_bytes)) +
-                  " available");
+              Locale::Format(
+                  "{0} available",
+                  {FormatBytes(static_cast<double>(
+                      model.system.available_memory_bytes))}),
+              model.system.memory_model);
   draw_metric("Commit", model.system.commit_ratio,
               FormatPercent(model.system.commit_ratio * 100.0),
-              std::to_string(static_cast<int>(model.system.page_reads_per_sec)) +
-                  " page reads/s");
+              Locale::Format(
+                  "{0} page reads/s",
+                  {std::to_string(
+                      static_cast<int>(model.system.page_reads_per_sec))}),
+              std::string{});
   const std::size_t disk_count = std::min<std::size_t>(2, model.disks.size());
   for (std::size_t i = 0; i < disk_count; ++i) {
     const auto& disk = model.disks[i];
     draw_metric(disk.media + " " + disk.name, disk.active_percent / 100.0,
                 FormatPercent(disk.active_percent),
-                FormatLatency(disk.latency_ms));
+                FormatLatency(disk.latency_ms), std::string{});
   }
   if (model.disks.empty()) {
-    DrawUtf8(dc, small_font_, kMutedText, "No physical disk counters available",
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Get("No physical disk counters available"),
              MakeRect(system_panel.left + panel_margin, row_y,
                       system_panel.right - panel_margin, row_y + row_height),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
 
-  DrawUtf8(dc, section_font_, kPrimaryText, "Diagnosis",
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Diagnosis"),
            MakeRect(diagnosis_panel.left + panel_margin,
                     diagnosis_panel.top + Scale(10), diagnosis_panel.right,
                     diagnosis_panel.top + Scale(38)),
@@ -577,14 +610,15 @@ void DashboardRenderer::DrawDashboard(
                          diagnosis_panel.top + Scale(66)),
                 kInfo);
     DrawUtf8(dc, body_font_, kPrimaryText,
-             "No significant bottleneck detected.",
+             Locale::Get("No significant bottleneck detected."),
              MakeRect(diagnosis_panel.left + panel_margin + Scale(20),
                       diagnosis_panel.top + Scale(46),
                       diagnosis_panel.right - panel_margin,
                       diagnosis_panel.top + Scale(78)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawUtf8(dc, small_font_, kSecondaryText,
-             "Keep this window open to build a longer evidence window.",
+             Locale::Get(
+                 "Keep this window open to build a longer evidence window."),
              MakeRect(diagnosis_panel.left + panel_margin,
                       diagnosis_panel.top + Scale(86),
                       diagnosis_panel.right - panel_margin,
@@ -601,13 +635,13 @@ void DashboardRenderer::DrawDashboard(
                     diagnosis_panel.left + panel_margin + Scale(3),
                     diagnosis_y + Scale(76)),
            color);
-      DrawUtf8(dc, small_font_, color, diagnosis.severity,
+      DrawUtf8(dc, small_font_, color, Locale::Get(diagnosis.severity),
                MakeRect(diagnosis_panel.left + panel_margin + Scale(12),
                         diagnosis_y - Scale(2),
                         diagnosis_panel.right - panel_margin,
                         diagnosis_y + Scale(18)),
                DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-      DrawUtf8(dc, section_font_, kPrimaryText, diagnosis.type,
+      DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get(diagnosis.type),
                MakeRect(diagnosis_panel.left + panel_margin + Scale(12),
                         diagnosis_y + Scale(18),
                         diagnosis_panel.right - panel_margin,
@@ -623,7 +657,7 @@ void DashboardRenderer::DrawDashboard(
     }
   }
 
-  DrawUtf8(dc, section_font_, kPrimaryText, "Top Impact",
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Top Impact"),
            MakeRect(impact_panel.left + panel_margin,
                     impact_panel.top + Scale(9), impact_panel.right,
                     impact_panel.top + Scale(36)),
@@ -684,13 +718,14 @@ void DashboardRenderer::DrawDashboard(
     impact_y += Scale(28);
   }
   if (impact_processes.empty()) {
-    DrawUtf8(dc, small_font_, kMutedText, "No process inventory available",
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Get("No process inventory available"),
              MakeRect(impact_panel.left + panel_margin, impact_y,
                       impact_panel.right - panel_margin, impact_y + Scale(28)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
 
-  DrawUtf8(dc, section_font_, kPrimaryText, "Protected Workload",
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Protected Workload"),
            MakeRect(protected_panel.left + panel_margin,
                     protected_panel.top + Scale(9), protected_panel.right,
                     protected_panel.top + Scale(36)),
@@ -712,7 +747,8 @@ void DashboardRenderer::DrawDashboard(
                       protected_y + Scale(22)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawUtf8(dc, small_font_, kSecondaryText,
-             workload.category + "  ·  " + workload.reason,
+             Locale::Get(workload.category) + "  ·  " +
+                 Locale::Get(workload.reason),
              MakeRect(protected_panel.left + panel_margin + Scale(16),
                       protected_y + Scale(18),
                       protected_panel.right - panel_margin,
@@ -721,7 +757,9 @@ void DashboardRenderer::DrawDashboard(
     protected_y += Scale(39);
   }
   if (model.protected_workloads.empty()) {
-    DrawUtf8(dc, small_font_, kMutedText, "No active developer workload detected",
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Get(
+                 "No active developer workload detected"),
              MakeRect(protected_panel.left + panel_margin, protected_y,
                       protected_panel.right - panel_margin,
                       protected_y + Scale(28)),
@@ -735,7 +773,7 @@ void DashboardRenderer::DrawDashboard(
                                        : model.coding_mode.active
                                              ? "Coding Mode Active"
                                              : "Coding Mode";
-  DrawUtf8(dc, section_font_, kPrimaryText, coding_title,
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get(coding_title),
            MakeRect(coding_panel.left + panel_margin,
                     coding_panel.top + Scale(11), coding_panel.right,
                     coding_panel.top + Scale(38)),
@@ -849,8 +887,8 @@ void DashboardRenderer::DrawProcesses(
       });
 
   DrawUtf8(dc, section_font_, kPrimaryText,
-           "Processes  " + std::to_string(processes.size()) + " / " +
-               std::to_string(model.processes.size()),
+           Locale::Get("Processes") + "  " + std::to_string(processes.size()) +
+               " / " + std::to_string(model.processes.size()),
            MakeRect(content.left + margin, content.top + Scale(8),
                     content.right - margin, content.top + Scale(38)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -871,8 +909,9 @@ void DashboardRenderer::DrawProcesses(
                                   ? RGB(245, 247, 250)
                                   : kSurface,
                      active ? kAccent : kBorder, Scale(5));
-    DrawUtf8(dc, small_font_, active ? kAccent : kSecondaryText, label,
-             bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawUtf8(dc, small_font_, active ? kAccent : kSecondaryText,
+             Locale::Get(label), bounds,
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     AddTarget(bounds, command);
     filter_x = bounds.right + Scale(6);
   };
@@ -892,7 +931,8 @@ void DashboardRenderer::DrawProcesses(
                    options.search_focused ? kAccent : kBorder, Scale(5));
   DrawUtf8(dc, body_font_,
            options.search.empty() ? kMutedText : kPrimaryText,
-           options.search.empty() ? "Search processes..." : options.search,
+           options.search.empty() ? Locale::Get("Search processes...")
+                                  : options.search,
            MakeRect(search_box.left + Scale(10), search_box.top,
                     search_box.right - Scale(10), search_box.bottom),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -922,7 +962,7 @@ void DashboardRenderer::DrawProcesses(
       DashboardUiAction::ProcessSortMemory, DashboardUiAction::ProcessSortIo,
       DashboardUiAction::ProcessSortImpact};
   for (std::size_t i = 0; i < labels.size(); ++i) {
-    std::string label = labels[i];
+    std::string label = Locale::Get(labels[i]);
     const bool active =
         (i == 1 && options.sort == ProcessSort::Cpu) ||
         (i == 2 && options.sort == ProcessSort::Memory) ||
@@ -996,9 +1036,10 @@ void DashboardRenderer::DrawProcesses(
              MakeRect(columns[3], row_y, columns[4] - Scale(8),
                       row_y + row_height),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    const std::string status = std::string(ImpactText(process.impact)) +
-                               (process.protected_workload ? " · Protected"
-                                                           : " · Normal");
+    const std::string status =
+        std::string(Locale::Get(ImpactText(process.impact))) +
+        (process.protected_workload ? Locale::Get(" · Protected")
+                                    : Locale::Get(" · Normal"));
     DrawUtf8(dc, small_font_, ImpactColor(process.impact), status,
              MakeRect(columns[4], row_y, columns[5], row_y + row_height),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1011,15 +1052,16 @@ void DashboardRenderer::DrawProcesses(
   }
   if (processes.empty()) {
     DrawUtf8(dc, body_font_, kMutedText,
-             "No process matches the current search and filter.",
+             Locale::Get("No process matches the current search and filter."),
              MakeRect(content.left + margin, row_y + Scale(18),
                       content.right - margin, row_y + Scale(58)),
              DT_LEFT | DT_TOP | DT_WORDBREAK);
   } else if (count < processes.size()) {
     DrawUtf8(dc, small_font_, kMutedText,
-             "Showing " + std::to_string(count) + " of " +
-                 std::to_string(processes.size()) +
-                 " matching processes. Refine the search to narrow the list.",
+             Locale::Format(
+                 "Showing {0} of {1} matching processes. Refine the search "
+                 "to narrow the list.",
+                 {std::to_string(count), std::to_string(processes.size())}),
              MakeRect(content.left + margin, row_y + Scale(4),
                       content.right - margin, row_y + Scale(28)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1039,19 +1081,23 @@ void DashboardRenderer::DrawProcesses(
                       detail.right - margin, detail.top + Scale(38)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawUtf8(dc, small_font_, kSecondaryText,
-             selected->process_class + "  ·  " + selected->protection +
-                 (selected->protected_workload ? "  ·  Protected"
-                                               : "  ·  Normal"),
+             Locale::Get(selected->process_class) + "  ·  " +
+                 Locale::Get(selected->protection) +
+                 (selected->protected_workload ? Locale::Get(" · Protected")
+                                               : Locale::Get(" · Normal")),
              MakeRect(detail.left + margin, detail.top + Scale(38),
                       detail.right - margin, detail.top + Scale(62)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     const std::string metrics =
-        "CPU " + FormatPercent(selected->cpu_percent) + "    Memory " +
+        Locale::Get("CPU") + " " + FormatPercent(selected->cpu_percent) +
+        "    " + Locale::Get("Memory") + " " +
         FormatBytes(static_cast<double>(selected->working_set_bytes)) +
-        "    Private " +
+        "    " + Locale::Get("Private") + " " +
         FormatBytes(static_cast<double>(selected->private_bytes)) +
-        "    Read " + FormatRate(selected->read_bytes_per_sec) +
-        "    Write " + FormatRate(selected->write_bytes_per_sec);
+        "    " + Locale::Get("Read") + " " +
+        FormatRate(selected->read_bytes_per_sec) + "    " +
+        Locale::Get("Write") + " " +
+        FormatRate(selected->write_bytes_per_sec);
     DrawUtf8(dc, mono_font_, kPrimaryText, metrics,
              MakeRect(detail.left + margin, detail.top + Scale(66),
                       detail.right - margin, detail.bottom - Scale(8)),
@@ -1069,12 +1115,14 @@ void DashboardRenderer::DrawDiagnosis(HDC dc, const RECT& content,
                  std::min(static_cast<int>(content.bottom), y + Scale(130)));
     RoundedRectangle(dc, empty, kSurface, kBorder, Scale(7));
     DrawUtf8(dc, section_font_, kPrimaryText,
-             "No significant bottleneck detected.",
+             Locale::Get("No significant bottleneck detected."),
              MakeRect(empty.left + Scale(20), empty.top + Scale(22),
                       empty.right - Scale(20), empty.top + Scale(52)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawUtf8(dc, body_font_, kSecondaryText,
-             "Diagnosis uses a sustained time window; isolated spikes do not become conclusions.",
+             Locale::Get(
+                 "Diagnosis uses a sustained time window; isolated spikes do "
+                 "not become conclusions."),
              MakeRect(empty.left + Scale(20), empty.top + Scale(60),
                       empty.right - Scale(20), empty.bottom - Scale(18)),
              DT_LEFT | DT_TOP | DT_WORDBREAK);
@@ -1088,11 +1136,11 @@ void DashboardRenderer::DrawDiagnosis(HDC dc, const RECT& content,
     Fill(dc, MakeRect(card.left, card.top + Scale(12), card.left + Scale(4),
                       card.bottom - Scale(12)),
          color);
-    DrawUtf8(dc, small_font_, color, diagnosis.severity,
+    DrawUtf8(dc, small_font_, color, Locale::Get(diagnosis.severity),
              MakeRect(card.left + Scale(20), card.top + Scale(12),
                       card.left + Scale(120), card.top + Scale(32)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    DrawUtf8(dc, section_font_, kPrimaryText, diagnosis.type,
+    DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get(diagnosis.type),
              MakeRect(card.left + Scale(20), card.top + Scale(34),
                       card.right - Scale(20), card.top + Scale(60)),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1108,12 +1156,13 @@ void DashboardRenderer::DrawProtected(HDC dc, const RECT& content,
                                       const DashboardViewModel& model) {
   RoundedRectangle(dc, content, kSurface, kBorder, Scale(7));
   const int margin = Scale(20);
-  DrawUtf8(dc, section_font_, kPrimaryText, "Protected Workload",
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Protected Workload"),
            MakeRect(content.left + margin, content.top + Scale(12),
                     content.right - margin, content.top + Scale(42)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   DrawUtf8(dc, small_font_, kSecondaryText,
-           "WorkBoost will not modify these active development tasks.",
+           Locale::Get(
+               "WorkBoost will not modify these active development tasks."),
            MakeRect(content.left + margin, content.top + Scale(40),
                     content.right - margin, content.top + Scale(66)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -1126,7 +1175,7 @@ void DashboardRenderer::DrawProtected(HDC dc, const RECT& content,
                          content.left + margin + Scale(9), y + Scale(26)),
                 kSuccess);
     DrawUtf8(dc, body_font_, kPrimaryText,
-             workload.category + "  ·  " + workload.name,
+             Locale::Get(workload.category) + "  ·  " + workload.name,
              MakeRect(content.left + margin + Scale(20), y,
                       content.left + static_cast<int>(Width(content) * 0.55),
                       y + Scale(30)),
@@ -1137,7 +1186,8 @@ void DashboardRenderer::DrawProtected(HDC dc, const RECT& content,
                       y + row_height),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawUtf8(dc, small_font_, kSecondaryText,
-             "Protected because: " + workload.reason,
+             Locale::Get("Protected because: ") +
+                 Locale::Get(workload.reason),
              MakeRect(content.left + static_cast<int>(Width(content) * 0.55),
                       y, content.right - margin, y + row_height),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1147,7 +1197,8 @@ void DashboardRenderer::DrawProtected(HDC dc, const RECT& content,
   }
   if (model.protected_workloads.empty()) {
     DrawUtf8(dc, body_font_, kMutedText,
-             "No active remote, serial, capture, build, Git, or development workload detected.",
+             Locale::Get("No active remote, serial, capture, build, Git, or "
+                         "development workload detected."),
              MakeRect(content.left + margin, y, content.right - margin,
                       y + Scale(52)),
              DT_LEFT | DT_TOP | DT_WORDBREAK);
@@ -1164,25 +1215,28 @@ void DashboardRenderer::DrawCodingMode(
                         static_cast<int>(content.top) + Scale(154)));
   RoundedRectangle(dc, summary, kSurface, kBorder, Scale(7));
   DrawUtf8(dc, page_title_font_, kPrimaryText,
-           model.coding_mode.safe_mode
-               ? "Recovery required"
-               : model.coding_mode.active ? "Coding Mode Active"
-                                          : "Coding Mode",
+           Locale::Get(model.coding_mode.safe_mode
+                           ? "Recovery required"
+                           : model.coding_mode.active ? "Coding Mode Active"
+                                                      : "Coding Mode"),
            MakeRect(summary.left + margin, summary.top + Scale(16),
                     summary.right - Scale(220), summary.top + Scale(52)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   DrawUtf8(dc, body_font_, kSecondaryText,
            model.coding_mode.operation_in_progress
                ? model.coding_mode.operation_status
-               : "Reduce unnecessary background activity while keeping SSH, serial, capture, Git, and build work protected.",
+               : Locale::Get(
+                     "Reduce unnecessary background activity while keeping "
+                     "SSH, serial, capture, Git, and build work protected."),
            MakeRect(summary.left + margin, summary.top + Scale(60),
                     summary.right - Scale(240), summary.top + Scale(104)),
            DT_LEFT | DT_TOP | DT_WORDBREAK);
   const std::string counts =
-      std::to_string(model.coding_mode.planned_actions) +
-      " planned changes   ·   " +
-      std::to_string(model.coding_mode.protected_workloads) +
-      " protected workloads";
+      Locale::Format("{0} planned changes",
+                     {std::to_string(model.coding_mode.planned_actions)}) +
+      "   ·   " +
+      Locale::Format("{0} protected workloads",
+                     {std::to_string(model.coding_mode.protected_workloads)});
   DrawUtf8(dc, small_font_, kSecondaryText, counts,
            MakeRect(summary.left + margin, summary.bottom - Scale(40),
                     summary.right - Scale(230), summary.bottom - Scale(14)),
@@ -1203,11 +1257,11 @@ void DashboardRenderer::DrawCodingMode(
                        : IsHovered(hovered, command) ? kAccentHover : kAccent,
                    Scale(5));
   DrawUtf8(dc, body_font_, kSurface,
-           model.coding_mode.operation_in_progress
-               ? "Working..."
-               : model.coding_mode.safe_mode ? "View Recovery"
-               : model.coding_mode.active ? "Exit and Restore"
-                                          : "Enter Coding Mode",
+           Locale::Get(model.coding_mode.operation_in_progress
+                           ? "Working..."
+                           : model.coding_mode.safe_mode ? "View Recovery"
+                           : model.coding_mode.active ? "Exit and Restore"
+                                                      : "Enter Coding Mode"),
            action_button, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   if (!model.coding_mode.operation_in_progress) {
     AddTarget(action_button, command);
@@ -1218,7 +1272,8 @@ void DashboardRenderer::DrawCodingMode(
                content.bottom);
   RoundedRectangle(dc, details, kSurface, kBorder, Scale(7));
   DrawUtf8(dc, section_font_, kPrimaryText,
-           model.coding_mode.active ? "Active Changes" : "Plan Preview",
+           Locale::Get(model.coding_mode.active ? "Active Changes"
+                                                : "Plan Preview"),
            MakeRect(details.left + margin, details.top + Scale(12),
                     details.right - margin, details.top + Scale(42)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -1239,24 +1294,26 @@ void DashboardRenderer::DrawRecovery(
                         static_cast<int>(content.top) + Scale(154)));
   RoundedRectangle(dc, summary, kSurface, kBorder, Scale(7));
   DrawUtf8(dc, page_title_font_, kPrimaryText,
-           model.recovery.required ? "Recovery Required"
-                                   : "Recovery & History",
+           Locale::Get(model.recovery.required ? "Recovery Required"
+                                               : "Recovery & History"),
            MakeRect(summary.left + margin, summary.top + Scale(16),
                     summary.right - Scale(220), summary.top + Scale(52)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   DrawUtf8(dc, body_font_, kSecondaryText,
-           model.recovery.required
-               ? "An unfinished Coding Mode session must be restored before "
-                 "new changes are allowed."
-               : "No unfinished session. Completed sessions are listed below.",
+           Locale::Get(model.recovery.required
+                           ? "An unfinished Coding Mode session must be "
+                             "restored before new changes are allowed."
+                           : "No unfinished session. Completed sessions are "
+                             "listed below."),
            MakeRect(summary.left + margin, summary.top + Scale(60),
                     summary.right - Scale(240), summary.top + Scale(104)),
            DT_LEFT | DT_TOP | DT_WORDBREAK);
   const std::string state =
       model.recovery.error.empty()
-          ? "State: " + model.recovery.state + "  ·  " +
-                std::to_string(model.recovery.actions.size()) +
-                " recorded action(s)"
+          ? Locale::Get("State: ") + Locale::Get(model.recovery.state) +
+                "  ·  " +
+                Locale::Format("{0} recorded action(s)",
+                               {std::to_string(model.recovery.actions.size())})
           : model.recovery.error;
   DrawUtf8(dc, small_font_, kSecondaryText, state,
            MakeRect(summary.left + margin, summary.bottom - Scale(40),
@@ -1278,7 +1335,8 @@ void DashboardRenderer::DrawRecovery(
                            : RGB(203, 209, 218),
                    Scale(5));
   DrawUtf8(dc, body_font_, kSurface,
-           model.recovery.can_restore ? "Restore Session" : "No Action Needed",
+           Locale::Get(model.recovery.can_restore ? "Restore Session"
+                                                  : "No Action Needed"),
            action_button, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   if (enabled) AddTarget(action_button, command);
 
@@ -1287,8 +1345,8 @@ void DashboardRenderer::DrawRecovery(
                content.bottom);
   RoundedRectangle(dc, details, kSurface, kBorder, Scale(7));
   DrawUtf8(dc, section_font_, kPrimaryText,
-           model.recovery.required ? "Session Details"
-                                   : "Completion History",
+           Locale::Get(model.recovery.required ? "Session Details"
+                                               : "Completion History"),
            MakeRect(details.left + margin, details.top + Scale(12),
                     details.right - margin, details.top + Scale(42)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -1299,32 +1357,52 @@ void DashboardRenderer::DrawRecovery(
 }
 
 void DashboardRenderer::DrawSettings(HDC dc, const RECT& content,
-                                     const DashboardViewModel& model) {
+                                     const DashboardViewModel& model,
+                                     const std::optional<DashboardUiCommand>& hovered) {
   const int margin = Scale(20);
   const RECT summary =
       MakeRect(content.left, content.top, content.right,
                std::min(static_cast<int>(content.bottom),
                         static_cast<int>(content.top) + Scale(132)));
   RoundedRectangle(dc, summary, kSurface, kBorder, Scale(7));
-  DrawUtf8(dc, page_title_font_, kPrimaryText, "Settings",
+  DrawUtf8(dc, page_title_font_, kPrimaryText, Locale::Get("Settings"),
            MakeRect(summary.left + margin, summary.top + Scale(16),
-                    summary.right - margin, summary.top + Scale(52)),
+                    summary.right - Scale(150), summary.top + Scale(52)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  // Language toggle: clicking switches the interface language.
+  const DashboardUiCommand language_command{DashboardUiAction::ToggleLanguage,
+                                            DashboardPage::Settings};
+  const RECT language_button =
+      MakeRect(summary.right - Scale(126), summary.top + Scale(17),
+               summary.right - margin, summary.top + Scale(49));
+  RoundedRectangle(dc, language_button,
+                   IsHovered(hovered, language_command) ? kAccentSoft
+                                                        : kSurface,
+                   kBorder, Scale(5));
+  DrawUtf8(dc, small_font_, kPrimaryText,
+           Locale::IsChinese() ? "English" : "中文", language_button,
+           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  AddTarget(language_button, language_command);
   DrawUtf8(dc, small_font_, kSecondaryText,
-           "Effective configuration is read-only in this release; edit the "
-           "config files beside the executable to adjust it.",
+           Locale::Get("Effective configuration is read-only in this release; "
+                       "edit the config files beside the executable to adjust "
+                       "it."),
            MakeRect(summary.left + margin, summary.top + Scale(54),
                     summary.right - margin, summary.top + Scale(82)),
            DT_LEFT | DT_TOP | DT_WORDBREAK);
   DrawUtf8(dc, small_font_, kSecondaryText,
-           std::to_string(model.settings.sample_interval_ms) +
-               " ms sampling  ·  " +
-               std::to_string(model.settings.history_seconds) +
-               " s history  ·  " +
-               std::to_string(model.settings.process_rule_count) +
-               " process rules  ·  " +
-               std::to_string(model.settings.service_rule_count) +
-               " service rules",
+           Locale::Format("{0} ms sampling",
+                          {std::to_string(model.settings.sample_interval_ms)}) +
+               "  ·  " +
+               Locale::Format("{0} s history",
+                              {std::to_string(model.settings.history_seconds)}) +
+               "  ·  " +
+               Locale::Format("{0} process rules",
+                              {std::to_string(
+                                  model.settings.process_rule_count)}) +
+               "  ·  " +
+               Locale::Format("{0} service rules",
+                              {std::to_string(model.settings.service_rule_count)}),
            MakeRect(summary.left + margin, summary.bottom - Scale(38),
                     summary.right - margin, summary.bottom - Scale(12)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1334,7 +1412,7 @@ void DashboardRenderer::DrawSettings(HDC dc, const RECT& content,
                content.bottom);
   RoundedRectangle(dc, details, kSurface, kBorder, Scale(7));
   DrawUtf8(dc, section_font_, kPrimaryText,
-           "Startup Inventory & Configuration",
+           Locale::Get("Startup Inventory & Configuration"),
            MakeRect(details.left + margin, details.top + Scale(12),
                     details.right - margin, details.top + Scale(42)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);

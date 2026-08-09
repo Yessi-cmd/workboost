@@ -582,6 +582,8 @@ DashboardViewModel DashboardPresenter::Build(
                 static_cast<double>(snapshot.memory.physical_total_bytes);
   model.system.commit_ratio = snapshot.memory.CommitRatio();
   model.system.page_reads_per_sec = snapshot.page_reads_per_sec;
+  model.system.cpu_model = snapshot.cpu_model;
+  model.system.memory_model = snapshot.memory_model;
   model.system.process_inventory_complete =
       snapshot.process_inventory_complete;
   model.system.tcp_inventory_complete = snapshot.tcp_inventory_complete;

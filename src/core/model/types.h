@@ -193,6 +193,9 @@ struct SystemSnapshot {
   MemorySnapshot memory;
   double page_reads_per_sec{};
   double pages_input_per_sec{};
+  // Static hardware identity, collected once at collector initialization.
+  std::string cpu_model;
+  std::string memory_model;
   std::vector<DiskSnapshot> disks;
   std::vector<ProcessSnapshot> processes;
   std::vector<TcpSession> tcp_sessions;

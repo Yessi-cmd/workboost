@@ -37,6 +37,7 @@ endfunction()
 add_library(workboost_core
   src/app/coding_mode_command.cpp
   src/app/elevated_action_handler.cpp
+  src/app/locale.cpp
   src/app/session_manager.cpp
   src/core/benchmark/benchmark.cpp
   src/core/config/config.cpp
@@ -55,6 +56,7 @@ add_library(workboost_core
   src/platform/windows/startup_api.cpp
   src/platform/windows/startup_benchmark_api.cpp
   src/platform/windows/system_collector.cpp
+  src/platform/windows/system_hardware.cpp
   src/platform/windows/windows_utils.cpp
 )
 

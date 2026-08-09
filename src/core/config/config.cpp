@@ -1,5 +1,7 @@
 #include "core/config/config.h"
 
+#include "platform/windows/windows_utils.h"
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -248,6 +250,15 @@ std::optional<double> ReadNumber(const std::string& json,
   }
 }
 
+std::optional<std::string> ReadString(const std::string& json,
+                                      const std::string& key) {
+  const std::regex pattern("\\\"" + key + "\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"",
+                           std::regex::icase);
+  std::smatch match;
+  if (!std::regex_search(json, match, pattern)) return std::nullopt;
+  return match[1].str();
+}
+
 std::optional<std::string> DelimitedBody(const std::string& json,
                                          const std::string& key,
                                          char open,
@@ -399,6 +410,7 @@ std::string ToLowerAscii(std::string value) {
 
 Config Config::Defaults() {
   Config config;
+  config.language = windows::DetectUILanguage();
 
   for (const char* name : {"system", "registry", "smss.exe", "csrss.exe",
                            "wininit.exe", "services.exe", "lsass.exe",
@@ -527,6 +539,19 @@ bool Config::LoadDirectory(const std::filesystem::path& directory,
   const auto service_rules_path = directory / "service_rules.json";
   if (const auto content = ReadConfig(service_rules_path, &warnings)) {
     LoadServiceRules(*content, this);
+  }
+
+  const auto settings_path = directory / "settings.json";
+  if (const auto content = ReadConfig(settings_path, &warnings)) {
+    if (const auto value = ReadString(*content, "language")) {
+      const std::string normalized = ToLowerAscii(*value);
+      if (normalized == "zh" || normalized == "cn" || normalized == "zh-cn" ||
+          normalized == "zh_cn" || normalized == "chinese") {
+        language = "zh";
+      } else if (normalized == "en" || normalized == "english") {
+        language = "en";
+      }
+    }
   }
 
   if (warning) {

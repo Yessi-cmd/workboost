@@ -1,4 +1,5 @@
 #include "app/coding_mode_command.h"
+#include "app/locale.h"
 #include "app/session_manager.h"
 #include "app/elevated_action_handler.h"
 #include "core/benchmark/benchmark.h"
@@ -16,6 +17,8 @@
 #include "platform/windows/serial_port_api.h"
 #include "platform/windows/startup_api.h"
 #include "platform/windows/startup_benchmark_api.h"
+#include "platform/windows/system_collector.h"
+#include "platform/windows/system_hardware.h"
 #include "platform/windows/windows_utils.h"
 
 #include <windows.h>
@@ -1165,6 +1168,41 @@ void TestDashboardRendererHitTargets() {
         "custom sidebar must expose a stable Processes hit target");
 }
 
+void TestDashboardLanguageToggleTarget() {
+  HWND window = CreateWindowExW(0, L"STATIC", L"WorkBoost renderer test",
+                                WS_POPUP, 0, 0, 32, 32, nullptr, nullptr,
+                                GetModuleHandleW(nullptr), nullptr);
+  Check(window != nullptr, "renderer test window should be created");
+  struct Cleanup {
+    HWND window;
+    ~Cleanup() {
+      if (window != nullptr) DestroyWindow(window);
+    }
+  } cleanup{window};
+
+  workboost::gui::DashboardRenderer renderer;
+  Check(renderer.Initialize(window),
+        "native dashboard renderer should initialize");
+  HDC dc = GetDC(window);
+  Check(dc != nullptr, "renderer test device context should be available");
+  const int dpi = std::max(96, GetDeviceCaps(dc, LOGPIXELSX));
+  const RECT bounds{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
+  workboost::gui::DashboardViewModel model;
+  model.mode = "Monitor Mode";
+  const std::optional<workboost::gui::DashboardViewModel> optional_model{model};
+  renderer.Paint(dc, bounds, optional_model,
+                 workboost::gui::DashboardPage::Settings, std::nullopt, "");
+  ReleaseDC(window, dc);
+
+  // Language button sits at the top-right of the Settings summary card:
+  // x = content.right - 126s .. - 20s, y = summary.top + 17s .. + 49s.
+  const POINT language_button{MulDiv(1183, dpi, 96), MulDiv(129, dpi, 96)};
+  const auto command = renderer.HitTest(language_button);
+  Check(command &&
+            command->action == workboost::gui::DashboardUiAction::ToggleLanguage,
+        "settings page must expose a stable language toggle hit target");
+}
+
 void TestCodingModeCommandValidation() {
   const auto below_minimum = workboost::CodingModeCommandClient::Execute(
       workboost::CodingModeCommand::Enter, 9);
@@ -1789,6 +1827,79 @@ void TestRealPriorityExecuteAndRollback() {
         "original priority must be restored");
 }
 
+void TestLocale() {
+  using workboost::Locale;
+  using workboost::LocaleId;
+  const LocaleId original = Locale::Current();
+  Locale::Set(LocaleId::English);
+  Check(Locale::Get("Dashboard") == "Dashboard",
+        "English locale must return the key unchanged");
+  Check(Locale::Get("not-a-translated-key") == "not-a-translated-key",
+        "untranslated keys must fall back to English");
+  Check(Locale::Format("{0} planned changes", {"5"}) == "5 planned changes",
+        "English format must substitute without translating");
+  Locale::Set(LocaleId::Chinese);
+  Check(Locale::Get("Dashboard") == "仪表盘",
+        "Chinese locale must translate known keys");
+  Check(!Locale::Get("Settings").empty(),
+        "Chinese settings label must be non-empty");
+  Check(Locale::Format("{0} planned changes", {"5"}) == "5 项计划变更",
+        "Chinese format must substitute into the translation");
+  Locale::Set(original);
+}
+
+void TestConfigLanguage() {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() /
+      ("workboost-lang-test-" + std::to_string(GetCurrentProcessId()) + "-" +
+       std::to_string(GetTickCount64()));
+  std::error_code filesystem_error;
+  std::filesystem::create_directories(directory, filesystem_error);
+  Check(!filesystem_error, "temporary language directory should be created");
+  struct Cleanup {
+    std::filesystem::path path;
+    ~Cleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } cleanup{directory};
+
+  std::string error;
+  Check(workboost::windows::AtomicWriteUtf8(
+            directory / "settings.json",
+            "{\n  \"language\": \"zh\"\n}\n", &error),
+        "settings.json fixture should be written: " + error);
+  workboost::Config config = workboost::Config::Defaults();
+  std::string warning;
+  Check(config.LoadDirectory(directory, &warning) && warning.empty() &&
+            config.language == "zh",
+        "settings.json language must be loaded and win over the default");
+  const workboost::Config defaults = workboost::Config::Defaults();
+  Check(defaults.language == "en" || defaults.language == "zh",
+        "default language must be a known value");
+}
+
+void TestHardwareInfo() {
+  std::string cpu_model;
+  std::string error;
+  Check(workboost::windows::QueryCpuModel(&cpu_model, &error) &&
+            !cpu_model.empty(),
+        "CPU model query must return a non-empty name: " + error);
+  std::string memory_model;
+  if (workboost::windows::QueryMemoryModel(&memory_model, &error)) {
+    Check(!memory_model.empty(), "memory model must be non-empty when read");
+  }
+
+  const workboost::Config config = workboost::Config::Defaults();
+  workboost::windows::SystemCollector collector(config);
+  workboost::windows::WindowsError collector_error;
+  Check(collector.Initialize(&collector_error),
+        "system collector must initialize: " + collector_error.Describe());
+  const auto snapshot = collector.Sample();
+  Check(!snapshot.cpu_model.empty(),
+        "sample must carry the collected CPU model");
+}
+
 }  // namespace
 
 int main() {
@@ -1825,12 +1936,17 @@ int main() {
        TestPassiveStartupBenchmarkTimeout},
       {"dashboard presenter", TestDashboardPresenter},
       {"dashboard renderer hit targets", TestDashboardRendererHitTargets},
+      {"dashboard language toggle target",
+       TestDashboardLanguageToggleTarget},
       {"Coding Mode command validation", TestCodingModeCommandValidation},
       {"completion report", TestCompletionReport},
       {"diagnosis rules", TestDiagnosisRules},
       {"benchmark window aggregation", TestBenchmarkWindowAggregation},
       {"session round trip", TestSessionRoundTrip},
       {"real priority execute and rollback", TestRealPriorityExecuteAndRollback},
+      {"locale translation", TestLocale},
+      {"config language setting", TestConfigLanguage},
+      {"hardware model queries", TestHardwareInfo},
   };
   std::size_t failures = 0;
   for (const auto& [name, test] : tests) {

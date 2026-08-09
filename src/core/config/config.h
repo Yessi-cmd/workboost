@@ -65,6 +65,9 @@ class Config {
   std::unordered_map<std::string, ProcessRule> process_rules;
   std::unordered_map<std::string, ServiceRule> service_rules;
   std::unordered_set<std::uint16_t> remote_debug_ports{22, 23};
+  // GUI language: "en" or "zh". Defaults to the Windows UI language; a
+  // settings.json in a loaded config directory overrides it.
+  std::string language{"en"};
 };
 
 std::string ToLowerAscii(std::string value);

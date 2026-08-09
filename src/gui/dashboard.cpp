@@ -1,6 +1,7 @@
 #include "gui/dashboard.h"
 
 #include "app/coding_mode_command.h"
+#include "app/locale.h"
 #include "app/session_manager.h"
 #include "core/logging/logger.h"
 #include "gui/dashboard_model.h"
@@ -56,6 +57,16 @@ int SystemDpi() {
   const int dpi = std::max(96, GetDeviceCaps(dc, LOGPIXELSX));
   ReleaseDC(nullptr, dc);
   return dpi;
+}
+
+// Persists the chosen language to %LOCALAPPDATA%\WorkBoost\settings.json,
+// which the config loader merges last so it wins on the next launch.
+void SaveLanguagePreference(LocaleId id) {
+  const std::string language = id == LocaleId::Chinese ? "zh" : "en";
+  const std::string content = "{\n  \"language\": \"" + language + "\"\n}\n";
+  std::string error;
+  (void)windows::AtomicWriteUtf8(
+      windows::LocalAppDataDirectory() / "settings.json", content, &error);
 }
 
 double DistanceToSegment(double px, double py, double ax, double ay, double bx,
@@ -273,10 +284,13 @@ class DashboardWindow {
         return DefWindowProcW(window_, message, wparam, lparam);
       case WM_CLOSE:
         if (coding_command_running_.load()) {
-          MessageBoxW(window_,
-                      L"A Coding Mode operation is still running. Complete "
-                      L"the operation before closing WorkBoost.",
-                      L"WorkBoost", MB_OK | MB_ICONINFORMATION);
+          MessageBoxW(
+              window_,
+              windows::Utf8ToWide(Locale::Get(
+                  "A Coding Mode operation is still running. Complete the "
+                  "operation before closing WorkBoost."))
+                  .c_str(),
+              L"WorkBoost", MB_OK | MB_ICONINFORMATION);
           return 0;
         }
         DestroyWindow(window_);
@@ -337,7 +351,19 @@ class DashboardWindow {
           std::lock_guard<std::mutex> lock(worker_mutex_);
           refresh_requested_ = true;
         }
-        status_message_ = "Refreshing...";
+        status_message_ = Locale::Get("Refreshing...");
+        worker_condition_.notify_one();
+        break;
+      case DashboardUiAction::ToggleLanguage:
+        Locale::Set(Locale::IsChinese() ? LocaleId::English
+                                        : LocaleId::Chinese);
+        SaveLanguagePreference(Locale::Current());
+        renderer_.NotifyLocaleChanged();
+        status_message_.clear();
+        {
+          std::lock_guard<std::mutex> lock(worker_mutex_);
+          refresh_requested_ = true;
+        }
         worker_condition_.notify_one();
         break;
       case DashboardUiAction::Export: ExportAll(); break;
@@ -352,24 +378,30 @@ class DashboardWindow {
         if (latest_model_->coding_mode.active) {
           const int answer = MessageBoxW(
               window_,
-              L"Exit Coding Mode and restore every reversible action in "
-              L"reverse order?\n\nWorkBoost will verify the restored state and "
-              L"keep Safe Mode active if restoration cannot be confirmed.",
-              L"Exit Coding Mode", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+              windows::Utf8ToWide(Locale::Get(
+                  "Exit Coding Mode and restore every reversible action in "
+                  "reverse order?\n\nWorkBoost will verify the restored state "
+                  "and keep Safe Mode active if restoration cannot be "
+                  "confirmed."))
+                  .c_str(),
+              windows::Utf8ToWide(Locale::Get("Exit Coding Mode")).c_str(),
+              MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
           if (answer == IDYES) StartCodingCommand(CodingModeCommand::Exit);
         } else {
           std::ostringstream confirmation;
-          confirmation << "Apply the reviewed Coding Mode plan?\n\n"
-                       << latest_model_->coding_mode.planned_actions
-                       << " planned action(s)\n"
-                       << latest_model_->coding_mode.protected_workloads
-                       << " protected workload(s)\n\n"
-                       << "A 10-second baseline is captured first. All system "
-                          "changes still pass ProtectionPolicy and "
-                          "SafetyValidator.";
+          confirmation
+              << Locale::Format(
+                     "Apply the reviewed Coding Mode plan?\n\n{0} planned "
+                     "action(s)\n{1} protected workload(s)\n\nA 10-second "
+                     "baseline is captured first. All system changes still "
+                     "pass ProtectionPolicy and SafetyValidator.",
+                     {std::to_string(
+                          latest_model_->coding_mode.planned_actions),
+                      std::to_string(
+                          latest_model_->coding_mode.protected_workloads)});
           const int answer = MessageBoxW(
               window_, windows::Utf8ToWide(confirmation.str()).c_str(),
-              L"Enter Coding Mode",
+              windows::Utf8ToWide(Locale::Get("Enter Coding Mode")).c_str(),
               MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
           if (answer == IDYES) StartCodingCommand(CodingModeCommand::Enter);
         }
@@ -398,7 +430,7 @@ class DashboardWindow {
         std::lock_guard<std::mutex> lock(worker_mutex_);
         refresh_requested_ = true;
       }
-      status_message_ = "Refreshing...";
+      status_message_ = Locale::Get("Refreshing...");
       worker_condition_.notify_one();
     }
     InvalidateRect(window_, nullptr, FALSE);
@@ -432,16 +464,17 @@ class DashboardWindow {
     active_coding_command_ = command;
     switch (command) {
       case CodingModeCommand::Enter:
-        coding_operation_status_ =
-            "Capturing a 10-second baseline, then applying the reviewed plan...";
+        coding_operation_status_ = Locale::Get(
+            "Capturing a 10-second baseline, then applying the reviewed "
+            "plan...");
         break;
       case CodingModeCommand::Exit:
-        coding_operation_status_ =
-            "Restoring reversible actions and verifying system state...";
+        coding_operation_status_ = Locale::Get(
+            "Restoring reversible actions and verifying system state...");
         break;
       case CodingModeCommand::Restore:
-        coding_operation_status_ =
-            "Restoring the unfinished session and verifying system state...";
+        coding_operation_status_ = Locale::Get(
+            "Restoring the unfinished session and verifying system state...");
         break;
     }
     status_message_ = coding_operation_status_;
@@ -472,9 +505,10 @@ class DashboardWindow {
       coding_command_running_.store(false);
       coding_operation_status_.clear();
       if (latest_model_) ApplyCodingOperationState(&*latest_model_);
-      status_message_ = "Could not start the Coding Mode operation.";
+      status_message_ = Locale::Get("Could not start the Coding Mode operation.");
       MessageBoxW(window_, windows::Utf8ToWide(error.what()).c_str(),
-                  L"Coding Mode failed", MB_OK | MB_ICONERROR);
+                  windows::Utf8ToWide(Locale::Get("Coding Mode failed")).c_str(),
+                  MB_OK | MB_ICONERROR);
     }
   }
 
@@ -494,20 +528,32 @@ class DashboardWindow {
 
     if (result->Succeeded()) {
       const bool entered = active_coding_command_ == CodingModeCommand::Enter;
-      status_message_ = entered ? "Coding Mode is active."
-                                : "System state was restored successfully.";
+      status_message_ = entered
+                            ? Locale::Get("Coding Mode is active.")
+                            : Locale::Get("System state was restored "
+                                          "successfully.");
       current_page_ = entered ? DashboardPage::CodingMode
                               : DashboardPage::Dashboard;
       MessageBoxW(window_,
-                  entered
-                      ? L"Coding Mode is active. WorkBoost recorded every "
-                        L"applied action for deterministic rollback."
-                      : L"The reversible session was restored and verified.",
-                  entered ? L"Coding Mode active" : L"Recovery complete",
+                  windows::Utf8ToWide(
+                      entered
+                          ? Locale::Get(
+                                "Coding Mode is active. WorkBoost recorded "
+                                "every applied action for deterministic "
+                                "rollback.")
+                          : Locale::Get(
+                                "The reversible session was restored and "
+                                "verified."))
+                      .c_str(),
+                  windows::Utf8ToWide(
+                      Locale::Get(entered ? "Coding Mode active"
+                                          : "Recovery complete"))
+                      .c_str(),
                   MB_OK | MB_ICONINFORMATION);
     } else {
       std::ostringstream details;
-      details << "WorkBoost did not complete the requested operation.";
+      details << Locale::Get("WorkBoost did not complete the requested "
+                             "operation.");
       if (result->error.code != 0) {
         details << "\r\n\r\n" << result->error.Describe();
       }
@@ -522,9 +568,11 @@ class DashboardWindow {
           details << "\r\n[output truncated]";
         }
       }
-      status_message_ = "Coding Mode operation failed; no result was hidden.";
+      status_message_ =
+          Locale::Get("Coding Mode operation failed; no result was hidden.");
       MessageBoxW(window_, windows::Utf8ToWide(details.str()).c_str(),
-                  L"Coding Mode failed", MB_OK | MB_ICONERROR);
+                  windows::Utf8ToWide(Locale::Get("Coding Mode failed")).c_str(),
+                  MB_OK | MB_ICONERROR);
     }
 
     {
@@ -586,10 +634,10 @@ class DashboardWindow {
     tray_icon_.uFlags = NIF_INFO;
     lstrcpynW(tray_icon_.szInfoTitle, L"WorkBoost",
               ARRAYSIZE(tray_icon_.szInfoTitle));
-    lstrcpynW(tray_icon_.szInfo,
-              L"WorkBoost is still running. Double-click the tray icon to "
-              L"open the dashboard.",
-              ARRAYSIZE(tray_icon_.szInfo));
+    const std::wstring tip = windows::Utf8ToWide(Locale::Get(
+        "WorkBoost is still running. Double-click the tray icon to open the "
+        "dashboard."));
+    lstrcpynW(tray_icon_.szInfo, tip.c_str(), ARRAYSIZE(tray_icon_.szInfo));
     tray_icon_.dwInfoFlags = NIIF_INFO;
     Shell_NotifyIconW(NIM_MODIFY, &tray_icon_);
   }
@@ -610,9 +658,12 @@ class DashboardWindow {
   void ShowTrayMenu() {
     if (tray_menu_ == nullptr) {
       tray_menu_ = CreatePopupMenu();
-      AppendMenuW(tray_menu_, MF_STRING, kTrayMenuOpen, L"Open WorkBoost");
+      const std::wstring open =
+          windows::Utf8ToWide(Locale::Get("Open WorkBoost"));
+      const std::wstring exit_label = windows::Utf8ToWide(Locale::Get("Exit"));
+      AppendMenuW(tray_menu_, MF_STRING, kTrayMenuOpen, open.c_str());
       AppendMenuW(tray_menu_, MF_SEPARATOR, 0, nullptr);
-      AppendMenuW(tray_menu_, MF_STRING, kTrayMenuExit, L"Exit");
+      AppendMenuW(tray_menu_, MF_STRING, kTrayMenuExit, exit_label.c_str());
     }
     SetForegroundWindow(window_);
     POINT cursor{};
@@ -625,10 +676,13 @@ class DashboardWindow {
       RestoreFromTray();
     } else if (command == kTrayMenuExit) {
       if (coding_command_running_.load()) {
-        MessageBoxW(window_,
-                    L"A Coding Mode operation is still running. Complete "
-                    L"the operation before closing WorkBoost.",
-                    L"WorkBoost", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(
+            window_,
+            windows::Utf8ToWide(Locale::Get(
+                "A Coding Mode operation is still running. Complete the "
+                "operation before closing WorkBoost."))
+                .c_str(),
+            L"WorkBoost", MB_OK | MB_ICONINFORMATION);
       } else {
         DestroyWindow(window_);
       }
@@ -744,7 +798,10 @@ class DashboardWindow {
 
   void ExportAll() const {
     if (!latest_model_) {
-      MessageBoxW(window_, L"Wait for the first sample before exporting.",
+      MessageBoxW(window_,
+                  windows::Utf8ToWide(Locale::Get(
+                      "Wait for the first sample before exporting."))
+                      .c_str(),
                   L"WorkBoost", MB_OK | MB_ICONINFORMATION);
       return;
     }
@@ -761,13 +818,15 @@ class DashboardWindow {
     if (!GetSaveFileNameW(&dialog)) return;
 
     std::ostringstream report;
-    report << "WorkBoost Dashboard\r\n"
-           << "Generated: " << latest_model_->updated_at << "\r\n"
-           << "Mode: " << latest_model_->mode << "\r\n";
+    report << Locale::Get("WorkBoost Dashboard") << "\r\n"
+           << Locale::Get("Generated: ") << latest_model_->updated_at
+           << "\r\n"
+           << Locale::Get("Mode: ") << Locale::Get(latest_model_->mode)
+           << "\r\n";
     const auto& names = DashboardPresenter::PageNames();
     for (std::size_t i = 0; i < names.size(); ++i) {
       report << "\r\n============================================================\r\n"
-             << names[i] << "\r\n"
+             << Locale::Get(names[i]) << "\r\n"
              << "============================================================\r\n"
              << latest_model_->pages[i] << "\r\n";
     }
@@ -775,11 +834,14 @@ class DashboardWindow {
     if (!windows::AtomicWriteUtf8(std::filesystem::path(file_name),
                                   report.str(), &error)) {
       MessageBoxW(window_, windows::Utf8ToWide(error).c_str(),
-                  L"Export failed", MB_OK | MB_ICONERROR);
+                  windows::Utf8ToWide(Locale::Get("Export failed")).c_str(),
+                  MB_OK | MB_ICONERROR);
       return;
     }
-    MessageBoxW(window_, L"Dashboard report exported.", L"WorkBoost",
-                MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(window_,
+                windows::Utf8ToWide(Locale::Get("Dashboard report exported."))
+                    .c_str(),
+                L"WorkBoost", MB_OK | MB_ICONINFORMATION);
   }
 
   Config config_;
@@ -789,7 +851,7 @@ class DashboardWindow {
   DashboardPage current_page_{DashboardPage::Dashboard};
   std::optional<DashboardUiCommand> hovered_;
   bool mouse_tracking_{};
-  std::string status_message_{"Collecting system metrics..."};
+  std::string status_message_{Locale::Get("Collecting system metrics...")};
   std::optional<DashboardViewModel> latest_model_;
   std::optional<DashboardViewModel> pending_model_;
   std::mutex pending_mutex_;
@@ -814,6 +876,10 @@ class DashboardWindow {
 }  // namespace
 
 int RunDashboard(const Config& config) {
+  // Apply the persisted (or OS-default) language before the window and its
+  // fonts are created.
+  Locale::Set(config.language == "zh" ? LocaleId::Chinese
+                                      : LocaleId::English);
   DashboardWindow dashboard(config);
   return dashboard.Run();
 }

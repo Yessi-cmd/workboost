@@ -231,6 +231,11 @@ std::string Iso8601Now() {
   return buffer;
 }
 
+std::string DetectUILanguage() {
+  return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE ? "zh"
+                                                                    : "en";
+}
+
 std::string JsonEscape(const std::string& value) {
   std::ostringstream output;
   for (const unsigned char ch : value) {

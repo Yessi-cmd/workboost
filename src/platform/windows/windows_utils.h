@@ -59,6 +59,8 @@ bool PathEqualsInsensitive(const std::filesystem::path& left,
 std::string Iso8601Now();
 std::string JsonEscape(const std::string& value);
 std::string MaskIpAddress(const std::string& address);
+// "zh" when the Windows UI language is Chinese, otherwise "en".
+std::string DetectUILanguage();
 
 bool AtomicWriteUtf8(const std::filesystem::path& path,
                      const std::string& content, std::string* error);

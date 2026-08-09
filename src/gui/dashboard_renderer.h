@@ -17,6 +17,7 @@ enum class DashboardUiAction {
   Export,
   CodingModePrimary,
   RecoveryRestore,
+  ToggleLanguage,
   FocusProcessSearch,
   ProcessFilterAll,
   ProcessFilterHighImpact,
@@ -70,6 +71,10 @@ class DashboardRenderer {
              const ProcessViewOptions& process_options = {});
   [[nodiscard]] std::optional<DashboardUiCommand> HitTest(POINT point) const;
 
+  // Recreates fonts after the interface language changed (the active locale
+  // is read from Locale::Current()).
+  void NotifyLocaleChanged();
+
  private:
   struct HitTarget {
     RECT bounds{};
@@ -101,7 +106,8 @@ class DashboardRenderer {
                     const DashboardViewModel& model,
                     const std::optional<DashboardUiCommand>& hovered);
   void DrawSettings(HDC dc, const RECT& content,
-                    const DashboardViewModel& model);
+                    const DashboardViewModel& model,
+                    const std::optional<DashboardUiCommand>& hovered);
   void DrawTextPage(HDC dc, const RECT& content, const std::string& text);
   void AddTarget(const RECT& bounds, DashboardUiCommand command);
   [[nodiscard]] int Scale(int value) const;

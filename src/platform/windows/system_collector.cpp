@@ -1,6 +1,7 @@
 #include "platform/windows/system_collector.h"
 
 #include "core/policy/protection_policy.h"
+#include "platform/windows/system_hardware.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -199,6 +200,11 @@ struct SystemCollector::Impl {
 
     processor_count = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     if (processor_count == 0) processor_count = 1;
+
+    // Static hardware identity; collected once here rather than per sample.
+    std::string hardware_error;
+    (void)QueryCpuModel(&cpu_model, &hardware_error);
+    (void)QueryMemoryModel(&memory_model, &hardware_error);
 
     const PDH_STATUS pdh_status = PdhOpenQueryW(nullptr, 0, &pdh_query);
     if (pdh_status == ERROR_SUCCESS) {
@@ -558,6 +564,8 @@ struct SystemCollector::Impl {
     snapshot.timestamp = std::chrono::system_clock::now();
     snapshot.cpu_percent = CollectCpu();
     snapshot.memory = CollectMemory();
+    snapshot.cpu_model = cpu_model;
+    snapshot.memory_model = memory_model;
     snapshot.processes = CollectProcesses(&snapshot.process_inventory_complete);
     snapshot.tcp_sessions =
         CollectTcpSessions(&snapshot.tcp_inventory_complete);
@@ -581,6 +589,8 @@ struct SystemCollector::Impl {
   bool initialized{};
   bool winsock_initialized{};
   DWORD processor_count{1};
+  std::string cpu_model;
+  std::string memory_model;
   std::uint64_t previous_idle{};
   std::uint64_t previous_kernel{};
   std::uint64_t previous_user{};
