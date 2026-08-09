@@ -54,7 +54,7 @@ Windows API 调用集中在 `src/platform/windows`。Core 层只依赖稳定数�
 
 `SystemCollector::Initialize` 建立 CPU、进程和 PDH 的第一组计数器基线；后续 `Sample` 使用区间差值计算速率。进程 CPU 会除以逻辑处理器数量，最终表示该进程占整机 CPU 的百分比。进程 PID 与启动时间一起保存，以区分 PID 复用。
 
-磁盘指标使用英文 PDH Counter 路径读取 `PhysicalDisk(*)` 的 Active Time、平均延迟、队列、吞吐和读写操作数。介质类型通过 `StorageDeviceSeekPenaltyProperty` 查询；查询失败时保留 `Unknown`，不会猜测介质类型。Collector 从 PDH 实例名提取已映射的盘符，并通过 `GetDiskFreeSpaceExW` 汇总卷总量与可用空间；映射或查询不完整时设置 `space_inventory_complete=false`，诊断层不会把不完整容量数据当作低空间证据。
+磁盘指标使用英文 PDH Counter 路径读取 `PhysicalDisk(*)` 的 Active Time、平均延迟、队列、吞吐和读写操作数。介质类型通过 `StorageDeviceSeekPenaltyProperty` 查询；查询失败时保留 `Unknown`，不会猜测介质类型。Collector 同时通过卷盘符的 `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` 映射所有已挂载本地卷，PDH 实例缺少某个卷时也会保留该物理盘记录；通过 `GetDiskFreeSpaceExW` 汇总卷总量与可用空间。映射或查询不完整时设置 `space_inventory_complete=false`，诊断层不会把不完整容量数据当作低空间证据。Dashboard 将同一物理盘的多个卷拆成独立盘符行，但 I/O 指标仍明确表示物理盘级数据。
 
 Defender、后台 I/O 和前台开发进程归因只统计 `process_inventory_complete=true` 的样本；`BackgroundIoImpact` 还要求同一样本的 TCP 清单完整，避免把清单缺失误解释为“确定未保护”。进程归因或磁盘实例必须覆盖至少半个窗口且不少于两个样本；覆盖不足时只保留与缺失证据无关的结论。
 诊断 JSON/TXT 与 Dashboard 同时显示总样本、Process 完整样本、TCP 完整样本和两者

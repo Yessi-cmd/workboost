@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -40,6 +41,20 @@ std::string FormatBytes(double bytes) {
 
 std::string FormatRate(double bytes_per_second) {
   return FormatBytes(bytes_per_second) + "/s";
+}
+
+std::vector<std::string> SplitVolumeNames(const std::string& volumes) {
+  std::vector<std::string> result;
+  std::istringstream input(volumes);
+  std::string volume;
+  while (input >> volume) {
+    if (volume.size() == 2 &&
+        std::isalpha(static_cast<unsigned char>(volume[0])) &&
+        volume[1] == ':') {
+      result.push_back(std::move(volume));
+    }
+  }
+  return result;
 }
 
 std::string InventoryState(bool complete) {
@@ -249,21 +264,26 @@ std::string BuildDashboard(const SystemSnapshot& snapshot) {
     output << "No physical disk counters available.\r\n";
   }
   for (const auto& disk : snapshot.disks) {
-    output << std::left << std::setw(14)
-           << (disk.volumes.empty() ? disk.instance : disk.volumes)
-           << std::setw(9) << ToString(disk.media) << std::right
-           << std::setw(6) << disk.active_ratio * 100.0 << "%  "
-           << std::setw(8) << disk.average_latency_ms << " ms  "
-           << FormatRate(disk.read_bytes_per_sec +
-                         disk.write_bytes_per_sec)
-           << "  " << disk.IoOperationsPerSec() << " IOPS";
-    if (disk.space_inventory_complete) {
-      output << "  free "
-             << FormatBytes(static_cast<double>(disk.free_space_bytes))
-             << " / "
-             << FormatBytes(static_cast<double>(disk.total_space_bytes));
+    auto volumes = SplitVolumeNames(disk.volumes);
+    if (volumes.empty()) {
+      volumes.push_back(disk.volumes.empty() ? disk.instance : disk.volumes);
     }
-    output << "\r\n";
+    for (const auto& volume : volumes) {
+      output << std::left << std::setw(14) << volume << std::setw(9)
+             << ToString(disk.media) << std::right << std::setw(6)
+             << disk.active_ratio * 100.0 << "%  " << std::setw(8)
+             << disk.average_latency_ms << " ms  "
+             << FormatRate(disk.read_bytes_per_sec +
+                           disk.write_bytes_per_sec)
+             << "  " << disk.IoOperationsPerSec() << " IOPS";
+      if (disk.space_inventory_complete) {
+        output << "  free "
+               << FormatBytes(static_cast<double>(disk.free_space_bytes))
+               << " / "
+               << FormatBytes(static_cast<double>(disk.total_space_bytes));
+      }
+      output << "\r\n";
+    }
   }
 
   const auto processes = SortedProcesses(snapshot);
@@ -588,15 +608,21 @@ DashboardViewModel DashboardPresenter::Build(
       snapshot.process_inventory_complete;
   model.system.tcp_inventory_complete = snapshot.tcp_inventory_complete;
   for (const auto& disk : snapshot.disks) {
-    DiskViewModel view;
-    view.name = disk.volumes.empty() ? disk.instance : disk.volumes;
-    view.media = ToString(disk.media);
-    view.active_percent = disk.active_ratio * 100.0;
-    view.latency_ms = disk.average_latency_ms;
-    view.queue_length = disk.queue_length;
-    view.throughput_bytes_per_sec =
-        disk.read_bytes_per_sec + disk.write_bytes_per_sec;
-    model.disks.push_back(std::move(view));
+    auto volumes = SplitVolumeNames(disk.volumes);
+    if (volumes.empty()) {
+      volumes.push_back(disk.volumes.empty() ? disk.instance : disk.volumes);
+    }
+    for (const auto& volume : volumes) {
+      DiskViewModel view;
+      view.name = volume;
+      view.media = ToString(disk.media);
+      view.active_percent = disk.active_ratio * 100.0;
+      view.latency_ms = disk.average_latency_ms;
+      view.queue_length = disk.queue_length;
+      view.throughput_bytes_per_sec =
+          disk.read_bytes_per_sec + disk.write_bytes_per_sec;
+      model.disks.push_back(std::move(view));
+    }
   }
   for (const auto& diagnosis : diagnoses) {
     DiagnosisViewModel view;

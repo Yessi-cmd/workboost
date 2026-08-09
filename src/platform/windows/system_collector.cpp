@@ -115,10 +115,31 @@ int PhysicalDriveNumber(const std::wstring& instance) {
   }
 }
 
-std::string VolumesFromInstance(const std::wstring& instance) {
+std::vector<std::wstring> VolumeNamesFromInstance(
+    const std::wstring& instance) {
+  std::vector<std::wstring> result;
   const auto space = instance.find(L' ');
-  return space == std::wstring::npos ? std::string{}
-                                     : WideToUtf8(instance.substr(space + 1));
+  if (space == std::wstring::npos) return result;
+  std::wistringstream volumes(instance.substr(space + 1));
+  std::wstring volume;
+  while (volumes >> volume) {
+    if (volume.size() == 2 && std::iswalpha(volume[0]) &&
+        volume[1] == L':') {
+      result.push_back(std::move(volume));
+    }
+  }
+  return result;
+}
+
+std::string VolumesToString(const std::vector<std::wstring>& volumes) {
+  std::ostringstream result;
+  bool first = true;
+  for (const auto& volume : volumes) {
+    if (!first) result << ' ';
+    result << WideToUtf8(volume);
+    first = false;
+  }
+  return result.str();
 }
 
 struct VolumeCapacity {
@@ -135,15 +156,13 @@ bool AddWithoutOverflow(std::uint64_t value, std::uint64_t* total) {
   return true;
 }
 
-VolumeCapacity CapacityFromInstance(const std::wstring& instance) {
+VolumeCapacity CapacityFromVolumes(
+    const std::vector<std::wstring>& volume_names) {
   VolumeCapacity result;
-  const auto space = instance.find(L' ');
-  if (space == std::wstring::npos) return result;
-  std::wistringstream volumes(instance.substr(space + 1));
-  std::wstring volume;
   bool found = false;
   bool failed = false;
-  while (volumes >> volume) {
+  for (const auto& volume_name : volume_names) {
+    std::wstring volume = volume_name;
     if (volume.size() != 2 || !std::iswalpha(volume[0]) ||
         volume[1] != L':') {
       continue;
@@ -161,6 +180,88 @@ VolumeCapacity CapacityFromInstance(const std::wstring& instance) {
   }
   result.complete = found && !failed && result.total_bytes != 0;
   return result;
+}
+
+std::vector<int> PhysicalDrivesForVolume(const std::wstring& root) {
+  std::vector<int> result;
+  if (root.size() < 2 || root[1] != L':') return result;
+  const std::wstring path = L"\\\\.\\" + root.substr(0, 2);
+  UniqueHandle volume(CreateFileW(path.c_str(), 0,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                  OPEN_EXISTING, 0, nullptr));
+  if (!volume.Valid()) return result;
+
+  std::vector<unsigned char> buffer(sizeof(VOLUME_DISK_EXTENTS));
+  DWORD returned = 0;
+  if (!DeviceIoControl(volume.Get(), IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+                       nullptr, 0, buffer.data(),
+                       static_cast<DWORD>(buffer.size()), &returned, nullptr)) {
+    if (GetLastError() != ERROR_MORE_DATA ||
+        buffer.size() < sizeof(VOLUME_DISK_EXTENTS)) {
+      return result;
+    }
+    const auto* initial =
+        reinterpret_cast<const VOLUME_DISK_EXTENTS*>(buffer.data());
+    const std::size_t extent_count = initial->NumberOfDiskExtents;
+    if (extent_count == 0 ||
+        extent_count >
+            (std::numeric_limits<std::size_t>::max() -
+             sizeof(VOLUME_DISK_EXTENTS)) /
+                sizeof(DISK_EXTENT) +
+                1) {
+      return result;
+    }
+    buffer.resize(sizeof(VOLUME_DISK_EXTENTS) +
+                  (extent_count - 1) * sizeof(DISK_EXTENT));
+    if (!DeviceIoControl(
+            volume.Get(), IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, nullptr, 0,
+            buffer.data(), static_cast<DWORD>(buffer.size()), &returned,
+            nullptr)) {
+      return result;
+    }
+  }
+
+  const auto* extents =
+      reinterpret_cast<const VOLUME_DISK_EXTENTS*>(buffer.data());
+  for (DWORD index = 0; index < extents->NumberOfDiskExtents; ++index) {
+    result.push_back(extents->Extents[index].DiskNumber);
+  }
+  std::sort(result.begin(), result.end());
+  result.erase(std::unique(result.begin(), result.end()), result.end());
+  return result;
+}
+
+std::map<int, std::vector<std::wstring>> LogicalVolumeMap() {
+  std::map<int, std::vector<std::wstring>> result;
+  const DWORD required = GetLogicalDriveStringsW(0, nullptr);
+  if (required == 0) return result;
+  std::vector<wchar_t> buffer(static_cast<std::size_t>(required) + 1);
+  const DWORD written = GetLogicalDriveStringsW(
+      static_cast<DWORD>(buffer.size()), buffer.data());
+  if (written == 0 || written >= buffer.size()) return result;
+
+  std::size_t offset = 0;
+  while (offset < buffer.size() && buffer[offset] != L'\0') {
+    const std::wstring root(buffer.data() + offset);
+    offset += root.size() + 1;
+    if (root.size() < 3 || root[1] != L':' || root[2] != L'\\') continue;
+    const UINT drive_type = GetDriveTypeW(root.c_str());
+    if (drive_type != DRIVE_FIXED && drive_type != DRIVE_REMOVABLE) continue;
+    const std::wstring volume = root.substr(0, 2);
+    for (const int drive_number : PhysicalDrivesForVolume(root)) {
+      result[drive_number].push_back(volume);
+    }
+  }
+  for (auto& [drive_number, volumes] : result) {
+    (void)drive_number;
+    std::sort(volumes.begin(), volumes.end());
+    volumes.erase(std::unique(volumes.begin(), volumes.end()), volumes.end());
+  }
+  return result;
+}
+
+VolumeCapacity CapacityFromInstance(const std::wstring& instance) {
+  return CapacityFromVolumes(VolumeNamesFromInstance(instance));
 }
 
 }  // namespace
@@ -470,31 +571,88 @@ struct SystemCollector::Impl {
     for (const auto& value : reads) instances.insert(value.first);
     for (const auto& value : writes) instances.insert(value.first);
 
-    std::vector<DiskSnapshot> result;
+    const auto now = std::chrono::steady_clock::now();
+    if (logical_volume_refresh.time_since_epoch().count() == 0 ||
+        now - logical_volume_refresh >= std::chrono::seconds(2)) {
+      logical_volume_cache = LogicalVolumeMap();
+      logical_volume_refresh = now;
+    }
+    const auto& logical_volumes = logical_volume_cache;
+    std::set<int> drive_numbers;
+    std::map<int, std::wstring> instances_by_drive;
+    std::vector<std::wstring> instances_without_drive;
     for (const auto& instance : instances) {
       if (instance == L"_Total") continue;
+      const int drive_number = PhysicalDriveNumber(instance);
+      if (drive_number < 0) {
+        instances_without_drive.push_back(instance);
+        continue;
+      }
+      drive_numbers.insert(drive_number);
+      instances_by_drive.emplace(drive_number, instance);
+    }
+    for (const auto& [drive_number, volumes] : logical_volumes) {
+      (void)volumes;
+      drive_numbers.insert(drive_number);
+    }
+
+    const auto fill_metrics = [&](DiskSnapshot* disk,
+                                  const std::wstring& instance) {
+      if (const auto it = active.find(instance); it != active.end())
+        disk->active_ratio = std::clamp(it->second / 100.0, 0.0, 1.0);
+      if (const auto it = latency.find(instance); it != latency.end())
+        disk->average_latency_ms = std::max(0.0, it->second * 1000.0);
+      if (const auto it = queue.find(instance); it != queue.end())
+        disk->queue_length = std::max(0.0, it->second);
+      if (const auto it = read.find(instance); it != read.end())
+        disk->read_bytes_per_sec = std::max(0.0, it->second);
+      if (const auto it = write.find(instance); it != write.end())
+        disk->write_bytes_per_sec = std::max(0.0, it->second);
+      if (const auto it = reads.find(instance); it != reads.end())
+        disk->read_operations_per_sec = std::max(0.0, it->second);
+      if (const auto it = writes.find(instance); it != writes.end())
+        disk->write_operations_per_sec = std::max(0.0, it->second);
+    };
+
+    std::vector<DiskSnapshot> result;
+    result.reserve(drive_numbers.size() + instances_without_drive.size());
+    for (const int drive_number : drive_numbers) {
       DiskSnapshot disk;
+      const auto instance_it = instances_by_drive.find(drive_number);
+      const std::wstring instance =
+          instance_it == instances_by_drive.end()
+              ? std::to_wstring(drive_number)
+              : instance_it->second;
       disk.instance = WideToUtf8(instance);
-      disk.volumes = VolumesFromInstance(instance);
-      disk.media = QueryDiskMedia(PhysicalDriveNumber(instance));
-      const auto capacity = CapacityFromInstance(instance);
+      std::vector<std::wstring> volumes;
+      if (const auto volume_it = logical_volumes.find(drive_number);
+          volume_it != logical_volumes.end()) {
+        volumes = volume_it->second;
+      }
+      if (volumes.empty()) volumes = VolumeNamesFromInstance(instance);
+      disk.volumes = VolumesToString(volumes);
+      disk.media = QueryDiskMedia(drive_number);
+      auto capacity = CapacityFromVolumes(volumes);
+      if (!capacity.complete && volumes.empty()) {
+        capacity = CapacityFromInstance(instance);
+      }
       disk.total_space_bytes = capacity.total_bytes;
       disk.free_space_bytes = capacity.free_bytes;
       disk.space_inventory_complete = capacity.complete;
-      if (const auto it = active.find(instance); it != active.end())
-        disk.active_ratio = std::clamp(it->second / 100.0, 0.0, 1.0);
-      if (const auto it = latency.find(instance); it != latency.end())
-        disk.average_latency_ms = std::max(0.0, it->second * 1000.0);
-      if (const auto it = queue.find(instance); it != queue.end())
-        disk.queue_length = std::max(0.0, it->second);
-      if (const auto it = read.find(instance); it != read.end())
-        disk.read_bytes_per_sec = std::max(0.0, it->second);
-      if (const auto it = write.find(instance); it != write.end())
-        disk.write_bytes_per_sec = std::max(0.0, it->second);
-      if (const auto it = reads.find(instance); it != reads.end())
-        disk.read_operations_per_sec = std::max(0.0, it->second);
-      if (const auto it = writes.find(instance); it != writes.end())
-        disk.write_operations_per_sec = std::max(0.0, it->second);
+      fill_metrics(&disk, instance);
+      result.push_back(std::move(disk));
+    }
+    for (const auto& instance : instances_without_drive) {
+      DiskSnapshot disk;
+      disk.instance = WideToUtf8(instance);
+      const auto volumes = VolumeNamesFromInstance(instance);
+      disk.volumes = VolumesToString(volumes);
+      disk.media = DiskMedia::Unknown;
+      const auto capacity = CapacityFromVolumes(volumes);
+      disk.total_space_bytes = capacity.total_bytes;
+      disk.free_space_bytes = capacity.free_bytes;
+      disk.space_inventory_complete = capacity.complete;
+      fill_metrics(&disk, instance);
       result.push_back(std::move(disk));
     }
     return result;
@@ -595,8 +753,10 @@ struct SystemCollector::Impl {
   std::uint64_t previous_kernel{};
   std::uint64_t previous_user{};
   std::chrono::steady_clock::time_point process_sample_time{};
+  std::chrono::steady_clock::time_point logical_volume_refresh{};
   std::unordered_map<std::uint32_t, RawProcessCounters> previous_processes;
   std::unordered_map<int, DiskMedia> disk_media;
+  std::map<int, std::vector<std::wstring>> logical_volume_cache;
 
   PDH_HQUERY pdh_query{};
   PDH_HCOUNTER disk_active{};

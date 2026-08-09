@@ -1111,6 +1111,12 @@ void TestDashboardPresenter() {
   snapshot.tcp_sessions.push_back(workboost::TcpSession{
       42, "0.0.0.0", 51000, "192.168.12.34", 22,
       workboost::TcpState::Established, false});
+  snapshot.disks.push_back(workboost::DiskSnapshot{
+      "0 C: D:", "C: D:", workboost::DiskMedia::SSD, 0.25, 0.004, 0.0,
+      0.0, 0.0, 0.0, 0.0, 0, 0, false});
+  snapshot.disks.push_back(workboost::DiskSnapshot{
+      "1 E:", "E:", workboost::DiskMedia::HDD, 0.5, 0.012, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0, 0, false});
   SnapshotHistory history(4);
   history.Add(snapshot);
   const auto model = workboost::gui::DashboardPresenter::Build(
@@ -1120,6 +1126,8 @@ void TestDashboardPresenter() {
   Check(model.system.memory_used_bytes == 12ULL * 1024 * 1024 * 1024 &&
             model.system.memory_total_bytes == 16ULL * 1024 * 1024 * 1024 &&
             model.processes.size() == 1 &&
+            model.disks.size() == 3 && model.disks[0].name == "C:" &&
+            model.disks[1].name == "D:" && model.disks[2].name == "E:" &&
             model.protected_workloads.size() == 1 &&
             model.protected_workloads[0].reason ==
                 "Active protected remote session" &&

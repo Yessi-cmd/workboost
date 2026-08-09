@@ -473,8 +473,19 @@ void DashboardRenderer::DrawDashboard(
   const int coding_height = Scale(92);
   const int available =
       std::max(Scale(320), Height(content) - coding_height - gap * 2);
-  const int top_height =
+  const int row_height = Scale(30);
+  const int subtitle_height = Scale(12);
+  const int disk_row_count = static_cast<int>(std::max<std::size_t>(
+      1, model.disks.size()));
+  const int required_top_height =
+      Scale(44) + 2 * (row_height + subtitle_height) +
+      row_height * (disk_row_count + 1) + Scale(8);
+  const int base_top_height =
       std::clamp(static_cast<int>(available * 0.58), Scale(220), Scale(300));
+  const int max_top_height = std::max(Scale(220), available - Scale(132));
+  const int top_height = std::clamp(
+      std::max(base_top_height, required_top_height), Scale(220),
+      max_top_height);
   const int bottom_height =
       std::clamp(available - top_height, Scale(132), Scale(180));
   const int left_width = static_cast<int>(Width(content) * 0.56);
@@ -507,26 +518,32 @@ void DashboardRenderer::DrawDashboard(
                     system_panel.top + Scale(38)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   const int label_width = Scale(72);
-  const int value_width = Scale(160);
-  const int row_height = Scale(32);
-  const int subtitle_height = Scale(14);
+  const int column_gap = Scale(12);
+  const int content_left = system_panel.left + panel_margin;
+  const int content_right = system_panel.right - panel_margin;
+  const int minimum_bar_width = Scale(32);
+  const int minimum_value_width = Scale(84);
+  const int content_width = Width(system_panel) - panel_margin * 2;
+  const int value_width = std::min(
+      Scale(170),
+      std::max(minimum_value_width,
+               content_width - label_width - column_gap * 2 -
+                   minimum_bar_width));
+  const int value_left = content_left + label_width + column_gap;
+  const int bar_left = value_left + value_width + column_gap;
   int row_y = system_panel.top + Scale(44);
   auto draw_metric = [&](const std::string& label, double ratio,
                          const std::string& value, const std::string& detail,
                          const std::string& subtitle) {
     const int row_top = row_y;
     DrawUtf8(dc, body_font_, kPrimaryText, Locale::Get(label),
-             MakeRect(system_panel.left + panel_margin, row_top,
-                      system_panel.left + panel_margin + label_width,
+             MakeRect(content_left, row_top, content_left + label_width,
                       row_top + (subtitle.empty() ? row_height : Scale(18))),
              subtitle.empty()
                  ? DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
                  : DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-    const int bar_left = system_panel.left + panel_margin + label_width;
     const int bar_right =
-        std::max(bar_left + Scale(32),
-                 static_cast<int>(system_panel.right) - panel_margin -
-                     value_width);
+        std::max(bar_left + minimum_bar_width, content_right);
     const int bar_y = row_top + Scale(15);
     const RECT track = MakeRect(bar_left, bar_y, bar_right, bar_y + Scale(5));
     RoundedRectangle(dc, track, kTrack, kTrack, Scale(3));
@@ -542,21 +559,19 @@ void DashboardRenderer::DrawDashboard(
                        Scale(3));
     }
     DrawUtf8(dc, metric_font_, kPrimaryText, value,
-             MakeRect(bar_right + Scale(10), row_top,
-                      system_panel.right - panel_margin, row_top + Scale(20)),
-             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+             MakeRect(value_left, row_top, bar_left - column_gap,
+                      row_top + Scale(20)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (!detail.empty()) {
       DrawUtf8(dc, small_font_, kSecondaryText, detail,
-               MakeRect(bar_right + Scale(10), row_top + Scale(17),
-                        system_panel.right - panel_margin,
+               MakeRect(value_left, row_top + Scale(17), bar_left - column_gap,
                         row_top + row_height),
-               DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     // Model label sits directly under its row, left of the value column.
     if (!subtitle.empty()) {
       DrawUtf8(dc, small_font_, kSecondaryText, subtitle,
-               MakeRect(system_panel.left + panel_margin,
-                        row_top + row_height, bar_right,
+               MakeRect(content_left, row_top + row_height, bar_right,
                         row_top + row_height + subtitle_height),
                DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
@@ -582,9 +597,7 @@ void DashboardRenderer::DrawDashboard(
                   {std::to_string(
                       static_cast<int>(model.system.page_reads_per_sec))}),
               std::string{});
-  const std::size_t disk_count = std::min<std::size_t>(2, model.disks.size());
-  for (std::size_t i = 0; i < disk_count; ++i) {
-    const auto& disk = model.disks[i];
+  for (const auto& disk : model.disks) {
     draw_metric(disk.media + " " + disk.name, disk.active_percent / 100.0,
                 FormatPercent(disk.active_percent),
                 FormatLatency(disk.latency_ms), std::string{});
