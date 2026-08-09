@@ -46,6 +46,10 @@ jobs:
         with:
           name: workboost-msvc-x64
           path: WorkBoost-*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-stage
+          path: build/stage
 
   mingw:
     name: MinGW-w64 x64
@@ -89,15 +93,39 @@ jobs:
           name: workboost-mingw-x64
           path: WorkBoost-*.zip
 
+  installer:
+    name: Windows installer
+    runs-on: windows-2022
+    needs: msvc
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-stage
+          path: build
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            installer\WorkBoost.iss /DMyAppVersion=$version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workboost-installer
+          path: installer-output
+
   release:
     name: Publish release
-    needs: [msvc, mingw]
+    needs: [msvc, mingw, installer]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: workboost-*
           merge-multiple: true
       - name: Create or update release
         shell: bash
@@ -111,4 +139,4 @@ jobs:
               --title "WorkBoost $tag" \
               --generate-notes
           fi
-          gh release upload "$tag" artifacts/*.zip --clobber
+          gh release upload "$tag" artifacts/* --clobber

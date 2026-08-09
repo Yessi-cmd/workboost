@@ -4,6 +4,19 @@ WorkBoost 是面向 Windows 10 x64 嵌入式网络开发工作站的低开销诊
 
 当前版本已实现设计文档中的 V1 主链路：CLI/原生 Dashboard 监控、开发负载保护、时间窗口诊断、Coding Mode、崩溃恢复、只读设备与启动项盘点、启动响应基准对比，以及隐私安全的本地事件日志。
 
+## 安装
+
+推荐从 GitHub Releases 页面下载安装包：
+
+- `WorkBoost-<版本>-setup.exe`：一键安装，免管理员权限；自动创建开始菜单和桌面快捷方式，卸载时也会在“应用和功能”中显示。
+- `WorkBoost-<版本>-msvc-x64.zip` / `WorkBoost-<版本>-mingw-x64.zip`：绿色版，解压后直接运行 `bin\workboost.exe`。
+
+安装版默认安装到 `%LOCALAPPDATA%\Programs\WorkBoost`。需要静默安装时执行：
+
+```powershell
+WorkBoost-0.1.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+```
+
 ## 已实现
 
 - 系统 CPU、物理内存、Commit、Page Reads/sec、Pages Input/sec 采样。
