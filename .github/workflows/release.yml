@@ -103,7 +103,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: installer-stage
-          path: build
+          path: build/stage
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build installer
