@@ -4,6 +4,7 @@
 #include "core/model/types.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,7 +21,15 @@ enum class ActionType {
 };
 
 enum class ActionRisk { Safe, Low, Medium, High, Forbidden };
-enum class ActionState { Planned, Applied, RolledBack, Failed, Rejected };
+enum class ActionState {
+  Planned,
+  Applied,
+  Completed,
+  RolledBack,
+  Uncertain,
+  Failed,
+  Rejected,
+};
 
 struct OptimizationAction {
   std::string id;
@@ -31,6 +40,11 @@ struct OptimizationAction {
   std::string process_name;
   std::uint32_t source_priority{};
   std::uint32_t target_priority{};
+  std::uint32_t timeout_ms{2000};
+  std::string service_name;
+  std::string expected_service_identity;
+  ServiceState source_service_state{ServiceState::Unknown};
+  bool explicit_confirmation{};
   std::string reason;
 };
 
@@ -38,8 +52,10 @@ struct ExecutedAction {
   OptimizationAction action;
   ActionState state{ActionState::Planned};
   std::uint32_t original_priority{};
+  ServiceState original_service_state{ServiceState::Unknown};
   unsigned long error_code{};
   std::string error_message;
+  std::string result_message;
 };
 
 struct OptimizationPlan {
@@ -82,7 +98,10 @@ class ActionExecutor {
 std::string ToString(ActionType value);
 std::string ToString(ActionRisk value);
 std::string ToString(ActionState value);
-ActionState ActionStateFromString(const std::string& value);
+std::optional<ActionType> ActionTypeFromString(const std::string& value);
+std::optional<ActionRisk> ActionRiskFromString(const std::string& value);
+std::optional<ActionState> ActionStateFromString(const std::string& value);
+bool IsReversible(ActionType value);
 std::uint32_t PriorityFromName(const std::string& value);
 std::string PriorityName(std::uint32_t value);
 

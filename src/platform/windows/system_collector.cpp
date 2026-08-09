@@ -17,9 +17,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cwctype>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -117,6 +120,48 @@ std::string VolumesFromInstance(const std::wstring& instance) {
                                      : WideToUtf8(instance.substr(space + 1));
 }
 
+struct VolumeCapacity {
+  std::uint64_t total_bytes{};
+  std::uint64_t free_bytes{};
+  bool complete{};
+};
+
+bool AddWithoutOverflow(std::uint64_t value, std::uint64_t* total) {
+  if (std::numeric_limits<std::uint64_t>::max() - *total < value) {
+    return false;
+  }
+  *total += value;
+  return true;
+}
+
+VolumeCapacity CapacityFromInstance(const std::wstring& instance) {
+  VolumeCapacity result;
+  const auto space = instance.find(L' ');
+  if (space == std::wstring::npos) return result;
+  std::wistringstream volumes(instance.substr(space + 1));
+  std::wstring volume;
+  bool found = false;
+  bool failed = false;
+  while (volumes >> volume) {
+    if (volume.size() != 2 || !std::iswalpha(volume[0]) ||
+        volume[1] != L':') {
+      continue;
+    }
+    found = true;
+    volume.push_back(L'\\');
+    ULARGE_INTEGER available{};
+    ULARGE_INTEGER total{};
+    ULARGE_INTEGER free{};
+    if (!GetDiskFreeSpaceExW(volume.c_str(), &available, &total, &free) ||
+        !AddWithoutOverflow(total.QuadPart, &result.total_bytes) ||
+        !AddWithoutOverflow(free.QuadPart, &result.free_bytes)) {
+      failed = true;
+    }
+  }
+  result.complete = found && !failed && result.total_bytes != 0;
+  return result;
+}
+
 }  // namespace
 
 struct SystemCollector::Impl {
@@ -162,6 +207,8 @@ struct SystemCollector::Impl {
       AddCounter(L"\\PhysicalDisk(*)\\Current Disk Queue Length", &disk_queue);
       AddCounter(L"\\PhysicalDisk(*)\\Disk Read Bytes/sec", &disk_read);
       AddCounter(L"\\PhysicalDisk(*)\\Disk Write Bytes/sec", &disk_write);
+      AddCounter(L"\\PhysicalDisk(*)\\Disk Reads/sec", &disk_reads);
+      AddCounter(L"\\PhysicalDisk(*)\\Disk Writes/sec", &disk_writes);
       AddCounter(L"\\Memory\\Page Reads/sec", &page_reads);
       AddCounter(L"\\Memory\\Pages Input/sec", &pages_input);
       PdhCollectQueryData(pdh_query);
@@ -226,7 +273,8 @@ struct SystemCollector::Impl {
     return result;
   }
 
-  std::vector<ProcessSnapshot> CollectProcesses() {
+  std::vector<ProcessSnapshot> CollectProcesses(bool* complete = nullptr) {
+    if (complete != nullptr) *complete = false;
     const auto now = std::chrono::steady_clock::now();
     const double elapsed = std::max(
         0.001, std::chrono::duration<double>(now - process_sample_time).count());
@@ -245,8 +293,13 @@ struct SystemCollector::Impl {
 
     PROCESSENTRY32W entry{};
     entry.dwSize = sizeof(entry);
-    if (!Process32FirstW(snapshot.Get(), &entry)) return result;
-    do {
+    if (!Process32FirstW(snapshot.Get(), &entry)) {
+      if (complete != nullptr && GetLastError() == ERROR_NO_MORE_FILES) {
+        *complete = true;
+      }
+      return result;
+    }
+    for (;;) {
       ProcessSnapshot process;
       process.pid = entry.th32ProcessID;
       process.parent_pid = entry.th32ParentProcessID;
@@ -295,10 +348,8 @@ struct SystemCollector::Impl {
       if (previous != previous_processes.end() &&
           previous->second.start == raw.start && raw.start != 0) {
         if (raw.cpu >= previous->second.cpu) {
-          process.cpu_percent = std::clamp(
-              (static_cast<double>(raw.cpu - previous->second.cpu) / 1.0e7) /
-                  elapsed / static_cast<double>(processor_count) * 100.0,
-              0.0, 100.0);
+          process.cpu_percent = NormalizeProcessCpuPercent(
+              raw.cpu - previous->second.cpu, elapsed, processor_count);
         }
         if (raw.read_bytes >= previous->second.read_bytes) {
           process.read_bytes_per_sec =
@@ -314,7 +365,14 @@ struct SystemCollector::Impl {
       }
       current.emplace(process.pid, raw);
       result.push_back(std::move(process));
-    } while (Process32NextW(snapshot.Get(), &entry));
+      SetLastError(ERROR_SUCCESS);
+      if (!Process32NextW(snapshot.Get(), &entry)) {
+        if (complete != nullptr && GetLastError() == ERROR_NO_MORE_FILES) {
+          *complete = true;
+        }
+        break;
+      }
+    }
     previous_processes = std::move(current);
     return result;
   }
@@ -337,7 +395,8 @@ struct SystemCollector::Impl {
     for (DWORD i = 0; i < item_count; ++i) {
       if (items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA ||
           items[i].FmtValue.CStatus == PDH_CSTATUS_NEW_DATA) {
-        result[items[i].szName] = items[i].FmtValue.doubleValue;
+        const double value = items[i].FmtValue.doubleValue;
+        if (std::isfinite(value)) result[items[i].szName] = value;
       }
     }
     return result;
@@ -354,6 +413,7 @@ struct SystemCollector::Impl {
         value.CStatus != PDH_CSTATUS_NEW_DATA) {
       return 0.0;
     }
+    if (!std::isfinite(value.doubleValue)) return 0.0;
     return std::max(0.0, value.doubleValue);
   }
 
@@ -393,12 +453,16 @@ struct SystemCollector::Impl {
     const auto queue = CounterArray(disk_queue);
     const auto read = CounterArray(disk_read);
     const auto write = CounterArray(disk_write);
+    const auto reads = CounterArray(disk_reads);
+    const auto writes = CounterArray(disk_writes);
     std::set<std::wstring> instances;
     for (const auto& value : active) instances.insert(value.first);
     for (const auto& value : latency) instances.insert(value.first);
     for (const auto& value : queue) instances.insert(value.first);
     for (const auto& value : read) instances.insert(value.first);
     for (const auto& value : write) instances.insert(value.first);
+    for (const auto& value : reads) instances.insert(value.first);
+    for (const auto& value : writes) instances.insert(value.first);
 
     std::vector<DiskSnapshot> result;
     for (const auto& instance : instances) {
@@ -407,6 +471,10 @@ struct SystemCollector::Impl {
       disk.instance = WideToUtf8(instance);
       disk.volumes = VolumesFromInstance(instance);
       disk.media = QueryDiskMedia(PhysicalDriveNumber(instance));
+      const auto capacity = CapacityFromInstance(instance);
+      disk.total_space_bytes = capacity.total_bytes;
+      disk.free_space_bytes = capacity.free_bytes;
+      disk.space_inventory_complete = capacity.complete;
       if (const auto it = active.find(instance); it != active.end())
         disk.active_ratio = std::clamp(it->second / 100.0, 0.0, 1.0);
       if (const auto it = latency.find(instance); it != latency.end())
@@ -417,13 +485,19 @@ struct SystemCollector::Impl {
         disk.read_bytes_per_sec = std::max(0.0, it->second);
       if (const auto it = write.find(instance); it != write.end())
         disk.write_bytes_per_sec = std::max(0.0, it->second);
+      if (const auto it = reads.find(instance); it != reads.end())
+        disk.read_operations_per_sec = std::max(0.0, it->second);
+      if (const auto it = writes.find(instance); it != writes.end())
+        disk.write_operations_per_sec = std::max(0.0, it->second);
       result.push_back(std::move(disk));
     }
     return result;
   }
 
-  std::vector<TcpSession> CollectTcpSessions() const {
+  std::vector<TcpSession> CollectTcpSessions(bool* complete = nullptr) const {
+    if (complete != nullptr) *complete = false;
     std::vector<TcpSession> result;
+    bool ipv4_complete = false;
     DWORD size = 0;
     if (GetExtendedTcpTable(nullptr, &size, TRUE, AF_INET,
                             TCP_TABLE_OWNER_PID_ALL, 0) ==
@@ -445,9 +519,11 @@ struct SystemCollector::Impl {
               ConvertTcpState(row.dwState),
               false});
         }
+        ipv4_complete = true;
       }
     }
 
+    bool ipv6_complete = false;
     size = 0;
     if (GetExtendedTcpTable(nullptr, &size, TRUE, AF_INET6,
                             TCP_TABLE_OWNER_PID_ALL, 0) ==
@@ -469,8 +545,10 @@ struct SystemCollector::Impl {
               ConvertTcpState(row.dwState),
               true});
         }
+        ipv6_complete = true;
       }
     }
+    if (complete != nullptr) *complete = ipv4_complete && ipv6_complete;
     return result;
   }
 
@@ -480,8 +558,9 @@ struct SystemCollector::Impl {
     snapshot.timestamp = std::chrono::system_clock::now();
     snapshot.cpu_percent = CollectCpu();
     snapshot.memory = CollectMemory();
-    snapshot.processes = CollectProcesses();
-    snapshot.tcp_sessions = CollectTcpSessions();
+    snapshot.processes = CollectProcesses(&snapshot.process_inventory_complete);
+    snapshot.tcp_sessions =
+        CollectTcpSessions(&snapshot.tcp_inventory_complete);
     if (pdh_query != nullptr) {
       PdhCollectQueryData(pdh_query);
       snapshot.page_reads_per_sec = CounterValue(page_reads);
@@ -515,6 +594,8 @@ struct SystemCollector::Impl {
   PDH_HCOUNTER disk_queue{};
   PDH_HCOUNTER disk_read{};
   PDH_HCOUNTER disk_write{};
+  PDH_HCOUNTER disk_reads{};
+  PDH_HCOUNTER disk_writes{};
   PDH_HCOUNTER page_reads{};
   PDH_HCOUNTER pages_input{};
 };

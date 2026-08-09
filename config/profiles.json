@@ -18,7 +18,9 @@
         "git.exe"
       ],
       "allow_graceful_close": [],
-      "allow_priority_down": []
+      "allow_priority_down": [],
+      "always_protect_services": [],
+      "allow_service_stop": []
     }
   }
 }

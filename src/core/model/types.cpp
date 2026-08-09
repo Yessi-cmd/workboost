@@ -5,6 +5,18 @@
 
 namespace workboost {
 
+double NormalizeProcessCpuPercent(std::uint64_t process_cpu_delta_100ns,
+                                  double elapsed_seconds,
+                                  std::uint32_t logical_processor_count) {
+  if (elapsed_seconds <= 0.0 || logical_processor_count == 0) return 0.0;
+  const double cpu_seconds =
+      static_cast<double>(process_cpu_delta_100ns) / 1.0e7;
+  return std::clamp(cpu_seconds / elapsed_seconds /
+                            static_cast<double>(logical_processor_count) *
+                        100.0,
+                    0.0, 100.0);
+}
+
 double MemorySnapshot::CommitRatio() const {
   return commit_limit_bytes == 0
              ? 0.0
@@ -111,6 +123,65 @@ std::string ToString(TcpState value) {
   return "UNKNOWN";
 }
 
+std::string ToString(ServiceState value) {
+  switch (value) {
+    case ServiceState::Stopped: return "STOPPED";
+    case ServiceState::StartPending: return "START_PENDING";
+    case ServiceState::StopPending: return "STOP_PENDING";
+    case ServiceState::Running: return "RUNNING";
+    case ServiceState::ContinuePending: return "CONTINUE_PENDING";
+    case ServiceState::PausePending: return "PAUSE_PENDING";
+    case ServiceState::Paused: return "PAUSED";
+    case ServiceState::Unknown: return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+std::optional<ServiceState> ServiceStateFromString(const std::string& value) {
+  if (value == "STOPPED") return ServiceState::Stopped;
+  if (value == "START_PENDING") return ServiceState::StartPending;
+  if (value == "STOP_PENDING") return ServiceState::StopPending;
+  if (value == "RUNNING") return ServiceState::Running;
+  if (value == "CONTINUE_PENDING") return ServiceState::ContinuePending;
+  if (value == "PAUSE_PENDING") return ServiceState::PausePending;
+  if (value == "PAUSED") return ServiceState::Paused;
+  if (value == "UNKNOWN") return ServiceState::Unknown;
+  return std::nullopt;
+}
+
+std::string ToString(ServiceClass value) {
+  switch (value) {
+    case ServiceClass::System: return "System";
+    case ServiceClass::Network: return "Network";
+    case ServiceClass::Security: return "Security";
+    case ServiceClass::RemoteAccess: return "RemoteAccess";
+    case ServiceClass::PacketCapture: return "PacketCapture";
+    case ServiceClass::Device: return "Device";
+    case ServiceClass::Updater: return "Updater";
+    case ServiceClass::CloudSync: return "CloudSync";
+    case ServiceClass::VendorUtility: return "VendorUtility";
+    case ServiceClass::Unknown: return "Unknown";
+  }
+  return "Unknown";
+}
+
+std::string ToString(StartupScope value) {
+  switch (value) {
+    case StartupScope::CurrentUser: return "CurrentUser";
+    case StartupScope::LocalMachine: return "LocalMachine";
+    case StartupScope::AllUsers: return "AllUsers";
+  }
+  return "CurrentUser";
+}
+
+std::string ToString(StartupSource value) {
+  switch (value) {
+    case StartupSource::RegistryRun: return "RegistryRun";
+    case StartupSource::StartupFolder: return "StartupFolder";
+  }
+  return "RegistryRun";
+}
+
 ProcessClass ProcessClassFromString(const std::string& value) {
   if (value == "System") return ProcessClass::System;
   if (value == "Security") return ProcessClass::Security;
@@ -137,6 +208,19 @@ ProtectionLevel ProtectionLevelFromString(const std::string& value) {
   return ProtectionLevel::Normal;
 }
 
+ServiceClass ServiceClassFromString(const std::string& value) {
+  if (value == "System") return ServiceClass::System;
+  if (value == "Network") return ServiceClass::Network;
+  if (value == "Security") return ServiceClass::Security;
+  if (value == "RemoteAccess") return ServiceClass::RemoteAccess;
+  if (value == "PacketCapture") return ServiceClass::PacketCapture;
+  if (value == "Device") return ServiceClass::Device;
+  if (value == "Updater") return ServiceClass::Updater;
+  if (value == "CloudSync") return ServiceClass::CloudSync;
+  if (value == "VendorUtility") return ServiceClass::VendorUtility;
+  return ServiceClass::Unknown;
+}
+
 RuntimeContext BuildRuntimeContext(
     const SystemSnapshot& snapshot,
     const std::unordered_set<std::uint16_t>& protected_remote_ports) {
@@ -155,7 +239,8 @@ RuntimeContext BuildRuntimeContext(
   }
   for (const auto& session : snapshot.tcp_sessions) {
     if (session.state == TcpState::Established &&
-        protected_remote_ports.count(session.remote_port) != 0) {
+        (session.remote_port == 22 || session.remote_port == 23 ||
+         protected_remote_ports.count(session.remote_port) != 0)) {
       context.remote_session_pids.insert(session.pid);
     }
   }

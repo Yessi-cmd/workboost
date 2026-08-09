@@ -50,8 +50,21 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
   std::vector<DiagnosisResult> results;
   if (history.Empty()) return results;
   const auto& snapshots = history.Snapshots();
-  const auto& latest = snapshots.back();
+  if (snapshots.size() < 2) return results;
   const double sample_count = static_cast<double>(snapshots.size());
+  const std::size_t minimum_evidence_samples =
+      std::max<std::size_t>(2, (snapshots.size() + 1) / 2);
+  const std::size_t complete_process_samples =
+      static_cast<std::size_t>(std::count_if(
+          snapshots.begin(), snapshots.end(), [](const auto& snapshot) {
+            return snapshot.process_inventory_complete;
+          }));
+  const std::size_t complete_protection_samples =
+      static_cast<std::size_t>(std::count_if(
+          snapshots.begin(), snapshots.end(), [](const auto& snapshot) {
+            return snapshot.process_inventory_complete &&
+                   snapshot.tcp_inventory_complete;
+          }));
 
   std::size_t memory_hits = 0;
   std::size_t paging_hits = 0;
@@ -127,7 +140,12 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
     double active_sum{};
     double latency_sum{};
     double queue_sum{};
+    double operations_sum{};
     std::size_t observations{};
+    std::size_t space_observations{};
+    std::size_t low_space_hits{};
+    std::uint64_t free_space_bytes{};
+    std::uint64_t total_space_bytes{};
   };
   std::map<std::string, DiskAggregate> disk_aggregates;
   for (const auto& snapshot : snapshots) {
@@ -139,7 +157,18 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
       aggregate.active_sum += disk.active_ratio;
       aggregate.latency_sum += disk.average_latency_ms;
       aggregate.queue_sum += disk.queue_length;
+      aggregate.operations_sum += disk.IoOperationsPerSec();
       ++aggregate.observations;
+      if (disk.media == DiskMedia::SSD && disk.space_inventory_complete) {
+        ++aggregate.space_observations;
+        aggregate.free_space_bytes = disk.free_space_bytes;
+        aggregate.total_space_bytes = disk.total_space_bytes;
+        aggregate.low_space_hits +=
+            disk.FreeSpaceRatio() <=
+                    config_.thresholds.ssd_free_space_ratio
+                ? 1U
+                : 0U;
+      }
       const double latency_threshold =
           disk.media == DiskMedia::SSD
               ? std::max(8.0, config_.thresholds.hdd_latency_ms / 3.0)
@@ -158,7 +187,7 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
   }
 
   for (const auto& [name, aggregate] : disk_aggregates) {
-    if (aggregate.observations == 0) continue;
+    if (aggregate.observations < minimum_evidence_samples) continue;
     const double fraction = static_cast<double>(aggregate.bottleneck_hits) /
                             static_cast<double>(aggregate.observations);
     if (fraction >= 0.5) {
@@ -176,7 +205,13 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
           {"media", ToString(aggregate.media)},
           {"active_ratio", aggregate.active_sum / aggregate.observations},
           {"avg_latency_ms", aggregate.latency_sum / aggregate.observations},
-          {"queue_length", aggregate.queue_sum / aggregate.observations}};
+          {"queue_length", aggregate.queue_sum / aggregate.observations},
+          {"operations_per_sec",
+           aggregate.operations_sum / aggregate.observations},
+          {"matching_samples",
+           static_cast<std::uint64_t>(aggregate.bottleneck_hits)},
+          {"sample_count",
+           static_cast<std::uint64_t>(aggregate.observations)}};
       results.push_back(std::move(result));
     }
 
@@ -197,8 +232,48 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
           {"commit_ratio", average_commit_ratio},
           {"page_reads_per_sec", average_page_reads},
           {"active_ratio", aggregate.active_sum / aggregate.observations},
-          {"avg_latency_ms", aggregate.latency_sum / aggregate.observations}};
+          {"avg_latency_ms", aggregate.latency_sum / aggregate.observations},
+          {"matching_samples",
+           static_cast<std::uint64_t>(aggregate.hdd_paging_hits)},
+          {"sample_count",
+           static_cast<std::uint64_t>(aggregate.observations)}};
       results.push_back(std::move(result));
+    }
+
+    if (aggregate.space_observations >= minimum_evidence_samples) {
+      const double space_fraction =
+          static_cast<double>(aggregate.low_space_hits) /
+          static_cast<double>(aggregate.space_observations);
+      if (space_fraction >= 0.5) {
+        const double free_ratio =
+            aggregate.total_space_bytes == 0
+                ? 0.0
+                : static_cast<double>(aggregate.free_space_bytes) /
+                      static_cast<double>(aggregate.total_space_bytes);
+        DiagnosisResult result;
+        result.type = "SsdSpacePressure";
+        result.severity =
+            free_ratio <=
+                    std::min(0.02,
+                             config_.thresholds.ssd_free_space_ratio * 0.25)
+                ? Severity::High
+                : Severity::Medium;
+        result.confidence =
+            ConfidenceFor(space_fraction, aggregate.space_observations);
+        result.summary =
+            "Free space stayed low on an SSD; no files were moved or deleted.";
+        result.evidence = {
+            {"disk", name},
+            {"volumes", aggregate.volumes},
+            {"free_space_ratio", free_ratio},
+            {"free_space_bytes", aggregate.free_space_bytes},
+            {"total_space_bytes", aggregate.total_space_bytes},
+            {"matching_samples",
+             static_cast<std::uint64_t>(aggregate.low_space_hits)},
+            {"sample_count",
+             static_cast<std::uint64_t>(aggregate.space_observations)}};
+        results.push_back(std::move(result));
+      }
     }
   }
 
@@ -218,7 +293,11 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
   double defender_io = 0.0;
   double all_process_io = 0.0;
   std::size_t defender_samples = 0;
+  std::size_t defender_impact_hits = 0;
+  std::size_t defender_cpu_hits = 0;
+  std::size_t defender_io_hits = 0;
   for (const auto& snapshot : snapshots) {
+    if (!snapshot.process_inventory_complete) continue;
     double sample_total_io = 0.0;
     for (const auto& process : snapshot.processes)
       sample_total_io += process.IoBytesPerSec();
@@ -227,91 +306,188 @@ std::vector<DiagnosisResult> DiagnosisEngine::Evaluate(
       defender_cpu += defender->cpu_percent;
       defender_io += defender->IoBytesPerSec();
       ++defender_samples;
+      const bool cpu_impact =
+          defender->cpu_percent >=
+          config_.thresholds.defender_cpu_ratio * 100.0;
+      const bool io_impact =
+          defender->IoBytesPerSec() >= 1024.0 * 1024.0 &&
+          sample_total_io > 0.0 &&
+          defender->IoBytesPerSec() / sample_total_io >=
+              config_.thresholds.defender_io_ratio;
+      defender_cpu_hits += cpu_impact ? 1U : 0U;
+      defender_io_hits += io_impact ? 1U : 0U;
+      defender_impact_hits += cpu_impact || io_impact ? 1U : 0U;
     }
   }
-  if (defender_samples != 0) {
-    const double average_defender_cpu = defender_cpu / sample_count;
-    const double average_defender_io = defender_io / sample_count;
+  if (defender_samples != 0 &&
+      complete_process_samples >= minimum_evidence_samples) {
+    const double process_sample_count =
+        static_cast<double>(complete_process_samples);
+    const double average_defender_cpu = defender_cpu / process_sample_count;
+    const double average_defender_io = defender_io / process_sample_count;
     const double io_share =
         all_process_io <= 0.0 ? 0.0 : defender_io / all_process_io;
-    const bool cpu_impact =
-        average_defender_cpu >= config_.thresholds.defender_cpu_ratio * 100.0;
-    const bool io_impact =
-        average_defender_io >= 1024.0 * 1024.0 &&
-        io_share >= config_.thresholds.defender_io_ratio;
-    if (cpu_impact || io_impact) {
+    const double impact_fraction = defender_impact_hits / process_sample_count;
+    if (impact_fraction >= 0.5) {
       DiagnosisResult result;
       result.type = "DefenderImpact";
-      result.severity = cpu_impact && io_impact ? Severity::High
-                                                : Severity::Medium;
-      result.confidence = defender_samples == snapshots.size()
-                              ? Confidence::High
-                              : Confidence::Medium;
+      result.severity = defender_cpu_hits / process_sample_count >= 0.5 &&
+                                defender_io_hits / process_sample_count >= 0.5
+                            ? Severity::High
+                            : Severity::Medium;
+      result.confidence =
+          ConfidenceFor(impact_fraction, complete_process_samples);
       result.summary =
-          "Microsoft Defender accounted for a material share of CPU or I/O; "
-          "no security setting was changed.";
+          "Microsoft Defender repeatedly accounted for a material share of "
+          "CPU or I/O; no security setting was changed.";
       result.evidence = {{"cpu_percent", average_defender_cpu},
                          {"io_bytes_per_sec", average_defender_io},
-                         {"io_share", io_share}};
+                         {"io_share", io_share},
+                         {"matching_samples", static_cast<std::uint64_t>(
+                                                  defender_impact_hits)},
+                         {"sample_count",
+                          static_cast<std::uint64_t>(
+                              complete_process_samples)}};
       results.push_back(std::move(result));
     }
   }
 
-  const ProcessSnapshot* top_background = nullptr;
-  for (const auto& process : latest.processes) {
-    const bool eligible = process.classification == ProcessClass::Updater ||
-                          process.classification == ProcessClass::CloudSync ||
-                          process.classification == ProcessClass::VendorUtility ||
-                          process.classification == ProcessClass::Communication;
-    if (!eligible || process.protection_level == ProtectionLevel::Strong ||
-        process.protection_level == ProtectionLevel::SystemCritical ||
-        process.protection_level == ProtectionLevel::UserExplicit) {
-      continue;
-    }
-    if (top_background == nullptr ||
-        process.IoBytesPerSec() > top_background->IoBytesPerSec()) {
-      top_background = &process;
+  struct ProcessImpactAggregate {
+    std::string name;
+    std::uint32_t pid{};
+    std::size_t matching_samples{};
+    double io_sum{};
+    std::uint64_t working_set_sum{};
+  };
+  using ProcessIdentity = std::pair<std::uint32_t, std::uint64_t>;
+  std::map<ProcessIdentity, ProcessImpactAggregate> background_aggregates;
+  std::map<ProcessIdentity, ProcessImpactAggregate> foreground_aggregates;
+  for (const auto& snapshot : snapshots) {
+    if (!snapshot.process_inventory_complete) continue;
+    const bool memory_pressure = IsMemoryPressure(snapshot, config_.thresholds);
+    for (const auto& process : snapshot.processes) {
+      const ProcessIdentity identity{process.pid, process.start_time_100ns};
+      const bool eligible_background =
+          process.classification == ProcessClass::Updater ||
+          process.classification == ProcessClass::CloudSync ||
+          process.classification == ProcessClass::VendorUtility ||
+          process.classification == ProcessClass::Communication;
+      const bool protected_process =
+          process.protection_level == ProtectionLevel::Strong ||
+          process.protection_level == ProtectionLevel::SystemCritical ||
+          process.protection_level == ProtectionLevel::UserExplicit;
+      if (snapshot.tcp_inventory_complete && eligible_background &&
+          !protected_process) {
+        auto& aggregate = background_aggregates[identity];
+        aggregate.name = process.name;
+        aggregate.pid = process.pid;
+        aggregate.io_sum += process.IoBytesPerSec();
+        aggregate.matching_samples +=
+            process.IoBytesPerSec() >=
+                    config_.thresholds.background_io_bytes_per_sec
+                ? 1U
+                : 0U;
+      }
+      if (memory_pressure && process.is_foreground &&
+          process.classification == ProcessClass::Development) {
+        auto& aggregate = foreground_aggregates[identity];
+        aggregate.name = process.name;
+        aggregate.pid = process.pid;
+        aggregate.working_set_sum += process.working_set_bytes;
+        ++aggregate.matching_samples;
+      }
     }
   }
-  if (top_background != nullptr &&
-      top_background->IoBytesPerSec() >=
-          config_.thresholds.background_io_bytes_per_sec) {
+
+  const ProcessImpactAggregate* top_background = nullptr;
+  double top_background_average_io = 0.0;
+  double top_background_fraction = 0.0;
+  for (const auto& [identity, aggregate] : background_aggregates) {
+    static_cast<void>(identity);
+    const double process_sample_count =
+        static_cast<double>(complete_protection_samples);
+    const double fraction = complete_protection_samples == 0
+                                ? 0.0
+                                : aggregate.matching_samples /
+                                      process_sample_count;
+    const double average_io = complete_protection_samples == 0
+                                  ? 0.0
+                                  : aggregate.io_sum / process_sample_count;
+    if (complete_protection_samples >= minimum_evidence_samples &&
+        fraction >= 0.5 &&
+        (top_background == nullptr ||
+         average_io > top_background_average_io)) {
+      top_background = &aggregate;
+      top_background_average_io = average_io;
+      top_background_fraction = fraction;
+    }
+  }
+  if (top_background != nullptr) {
     DiagnosisResult result;
     result.type = "BackgroundIoImpact";
-    result.severity = Severity::Medium;
-    result.confidence = Confidence::Medium;
-    result.summary = "An unprotected background application generated heavy I/O.";
+    result.severity =
+        top_background_average_io >=
+                config_.thresholds.background_io_bytes_per_sec * 3.0
+            ? Severity::High
+            : Severity::Medium;
+    result.confidence =
+        ConfidenceFor(top_background_fraction, complete_protection_samples);
+    result.summary =
+        "An unprotected background application sustained heavy I/O.";
     result.evidence = {{"process", top_background->name},
                        {"pid", static_cast<std::uint64_t>(top_background->pid)},
-                       {"io_bytes_per_sec", top_background->IoBytesPerSec()}};
+                       {"io_bytes_per_sec", top_background_average_io},
+                       {"matching_samples", static_cast<std::uint64_t>(
+                                                top_background->matching_samples)},
+                       {"sample_count",
+                        static_cast<std::uint64_t>(
+                            complete_protection_samples)}};
     results.push_back(std::move(result));
   }
 
-  if (IsMemoryPressure(latest, config_.thresholds)) {
-    const auto foreground = std::find_if(
-        latest.processes.begin(), latest.processes.end(),
-        [](const ProcessSnapshot& process) {
-          return process.is_foreground &&
-                 process.classification == ProcessClass::Development;
-        });
-    if (foreground != latest.processes.end()) {
-      DiagnosisResult result;
-      result.type = "ForegroundAppMemoryPressure";
-      result.severity = PressureSeverity(
-          static_cast<double>(latest.memory.physical_available_bytes) / kMiB,
-          latest.memory.CommitRatio(), config_.thresholds);
-      result.confidence = Confidence::Medium;
-      result.summary =
-          "The active development application was running under system memory "
-          "pressure.";
-      result.evidence = {
-          {"process", foreground->name},
-          {"pid", static_cast<std::uint64_t>(foreground->pid)},
-          {"working_set_bytes", foreground->working_set_bytes},
-          {"available_memory_mb",
-           static_cast<double>(latest.memory.physical_available_bytes) / kMiB}};
-      results.push_back(std::move(result));
+  const ProcessImpactAggregate* foreground = nullptr;
+  double foreground_fraction = 0.0;
+  for (const auto& [identity, aggregate] : foreground_aggregates) {
+    static_cast<void>(identity);
+    const double process_sample_count =
+        static_cast<double>(complete_process_samples);
+    const double fraction = complete_process_samples == 0
+                                ? 0.0
+                                : aggregate.matching_samples /
+                                      process_sample_count;
+    if (complete_process_samples >= minimum_evidence_samples &&
+        fraction >= 0.5 &&
+        (foreground == nullptr ||
+         aggregate.matching_samples > foreground->matching_samples)) {
+      foreground = &aggregate;
+      foreground_fraction = fraction;
     }
+  }
+  if (foreground != nullptr) {
+    DiagnosisResult result;
+    result.type = "ForegroundAppMemoryPressure";
+    result.severity = PressureSeverity(average_available_mb,
+                                       average_commit_ratio,
+                                       config_.thresholds);
+    result.confidence =
+        ConfidenceFor(foreground_fraction, complete_process_samples);
+    result.summary =
+        "The active development application repeatedly coincided with system "
+        "memory pressure.";
+    result.evidence = {
+        {"process", foreground->name},
+        {"pid", static_cast<std::uint64_t>(foreground->pid)},
+        {"working_set_bytes",
+         foreground->matching_samples == 0
+             ? std::uint64_t{0}
+             : foreground->working_set_sum / foreground->matching_samples},
+        {"available_memory_mb", average_available_mb},
+        {"commit_ratio", average_commit_ratio},
+        {"matching_samples",
+         static_cast<std::uint64_t>(foreground->matching_samples)},
+        {"sample_count",
+         static_cast<std::uint64_t>(complete_process_samples)}};
+    results.push_back(std::move(result));
   }
 
   std::stable_sort(results.begin(), results.end(),

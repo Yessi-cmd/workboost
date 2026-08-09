@@ -13,6 +13,10 @@
 
 namespace workboost {
 
+[[nodiscard]] double NormalizeProcessCpuPercent(
+    std::uint64_t process_cpu_delta_100ns, double elapsed_seconds,
+    std::uint32_t logical_processor_count);
+
 enum class ProcessClass {
   System,
   Security,
@@ -42,6 +46,32 @@ enum class ProtectionLevel {
 enum class DiskMedia { Unknown, SSD, HDD };
 enum class Severity { Low, Medium, High };
 enum class Confidence { Low, Medium, High };
+enum class ServiceState {
+  Unknown,
+  Stopped,
+  StartPending,
+  StopPending,
+  Running,
+  ContinuePending,
+  PausePending,
+  Paused,
+};
+
+enum class ServiceClass {
+  System,
+  Network,
+  Security,
+  RemoteAccess,
+  PacketCapture,
+  Device,
+  Updater,
+  CloudSync,
+  VendorUtility,
+  Unknown,
+};
+
+enum class StartupScope { CurrentUser, LocalMachine, AllUsers };
+enum class StartupSource { RegistryRun, StartupFolder };
 
 enum class TcpState {
   Unknown,
@@ -78,6 +108,22 @@ struct DiskSnapshot {
   double queue_length{};
   double read_bytes_per_sec{};
   double write_bytes_per_sec{};
+  double read_operations_per_sec{};
+  double write_operations_per_sec{};
+  std::uint64_t total_space_bytes{};
+  std::uint64_t free_space_bytes{};
+  bool space_inventory_complete{};
+
+  [[nodiscard]] double IoOperationsPerSec() const {
+    return read_operations_per_sec + write_operations_per_sec;
+  }
+
+  [[nodiscard]] double FreeSpaceRatio() const {
+    return total_space_bytes == 0
+               ? 0.0
+               : static_cast<double>(free_space_bytes) /
+                     static_cast<double>(total_space_bytes);
+  }
 };
 
 struct ProcessSnapshot {
@@ -113,6 +159,34 @@ struct TcpSession {
   bool ipv6{};
 };
 
+struct ServiceSnapshot {
+  std::string name;
+  std::string display_name;
+  ServiceState state{ServiceState::Unknown};
+  std::uint32_t pid{};
+  std::uint32_t win32_exit_code{};
+  std::uint32_t service_specific_exit_code{};
+  std::uint32_t service_type{};
+  std::uint32_t start_type{};
+  bool accepts_stop{};
+  bool identity_verified{};
+  std::string identity_token;
+};
+
+struct SerialPortSnapshot {
+  std::string port_name;
+  std::string friendly_name;
+  std::string manufacturer;
+};
+
+struct StartupEntrySnapshot {
+  StartupScope scope{StartupScope::CurrentUser};
+  StartupSource source{StartupSource::RegistryRun};
+  std::string location;
+  std::string name;
+  std::string executable_name;
+};
+
 struct SystemSnapshot {
   std::chrono::system_clock::time_point timestamp{};
   double cpu_percent{};
@@ -122,6 +196,10 @@ struct SystemSnapshot {
   std::vector<DiskSnapshot> disks;
   std::vector<ProcessSnapshot> processes;
   std::vector<TcpSession> tcp_sessions;
+  std::vector<ServiceSnapshot> services;
+  bool process_inventory_complete{};
+  bool tcp_inventory_complete{};
+  bool service_inventory_complete{};
 };
 
 using EvidenceValue =
@@ -162,9 +240,15 @@ std::string ToString(DiskMedia value);
 std::string ToString(Severity value);
 std::string ToString(Confidence value);
 std::string ToString(TcpState value);
+std::string ToString(ServiceState value);
+std::string ToString(ServiceClass value);
+std::string ToString(StartupScope value);
+std::string ToString(StartupSource value);
 
 ProcessClass ProcessClassFromString(const std::string& value);
 ProtectionLevel ProtectionLevelFromString(const std::string& value);
+std::optional<ServiceState> ServiceStateFromString(const std::string& value);
+ServiceClass ServiceClassFromString(const std::string& value);
 RuntimeContext BuildRuntimeContext(const SystemSnapshot& snapshot);
 RuntimeContext BuildRuntimeContext(
     const SystemSnapshot& snapshot,
