@@ -117,6 +117,13 @@ void DrawUtf8(HDC dc, HFONT font, COLORREF color, const std::string& text,
   DrawWide(dc, font, color, windows::Utf8ToWide(text), bounds, format);
 }
 
+int MeasureFontHeight(HDC dc, HFONT font) {
+  if (dc == nullptr || font == nullptr) return 0;
+  SelectScope select(dc, font);
+  TEXTMETRICW metrics{};
+  return GetTextMetricsW(dc, &metrics) ? metrics.tmHeight : 0;
+}
+
 std::string FormatBytes(double bytes) {
   constexpr double kKiB = 1024.0;
   constexpr double kMiB = kKiB * 1024.0;
@@ -200,16 +207,21 @@ bool IsHovered(const std::optional<DashboardUiCommand>& hovered,
 }  // namespace
 
 DashboardOverviewLayout CalculateDashboardOverviewLayout(
-    int maximum_height, int overview_width, std::size_t disk_count) {
+    int maximum_height, int overview_width, std::size_t disk_count,
+    int primary_text_height, int secondary_text_height) {
   constexpr int kHeaderHeight = 44;
   constexpr int kBottomPadding = 8;
   constexpr int kDiskColumnGap = 12;
   const std::size_t item_count = std::max<std::size_t>(1, disk_count);
+  const int primary_height = std::max(1, primary_text_height);
+  const int secondary_height = std::max(1, secondary_text_height);
 
-  const auto calculate = [&](int metric_row_height, int disk_row_height,
+  const auto calculate = [&](int primary_line_height, int metric_row_height,
+                             int disk_row_height,
                              int minimum_column_width,
                              std::size_t column_limit, bool compact) {
     DashboardOverviewLayout layout;
+    layout.primary_line_height = primary_line_height;
     layout.metric_row_height = metric_row_height;
     layout.disk_row_height = disk_row_height;
     layout.compact = compact;
@@ -236,10 +248,18 @@ DashboardOverviewLayout CalculateDashboardOverviewLayout(
     return layout;
   };
 
-  auto layout = calculate(32, 32, 152, 3, false);
+  const int regular_primary_height = primary_height + 2;
+  const int regular_row_height =
+      regular_primary_height + secondary_height + 3;
+  auto layout = calculate(regular_primary_height, regular_row_height,
+                          regular_row_height, 152, 3, false);
   if (layout.fits) return layout;
 
-  auto compact_layout = calculate(30, 30, 112, 4, true);
+  const int compact_primary_height = primary_height + 1;
+  const int compact_row_height =
+      compact_primary_height + secondary_height + 1;
+  auto compact_layout = calculate(compact_primary_height, compact_row_height,
+                                  compact_row_height, 112, 4, true);
   if (compact_layout.fits ||
       compact_layout.required_height < layout.required_height) {
     return compact_layout;
@@ -295,6 +315,18 @@ void DashboardRenderer::RecreateFonts(int dpi) {
   small_font_ = create(9, FW_NORMAL, text_family);
   metric_font_ = create(11, FW_SEMIBOLD, L"Consolas");
   mono_font_ = create(9, FW_NORMAL, L"Consolas");
+
+  HDC metrics_dc = GetDC(window_);
+  body_line_height_ = MeasureFontHeight(metrics_dc, body_font_);
+  small_line_height_ = MeasureFontHeight(metrics_dc, small_font_);
+  metric_line_height_ = MeasureFontHeight(metrics_dc, metric_font_);
+  if (metrics_dc != nullptr) ReleaseDC(window_, metrics_dc);
+  body_line_height_ =
+      std::max(body_line_height_, std::max(1, MulDiv(14, dpi, 96)));
+  small_line_height_ =
+      std::max(small_line_height_, std::max(1, MulDiv(13, dpi, 96)));
+  metric_line_height_ =
+      std::max(metric_line_height_, std::max(1, MulDiv(16, dpi, 96)));
 }
 
 int DashboardRenderer::Scale(int value) const {
@@ -534,13 +566,19 @@ void DashboardRenderer::DrawDashboard(
   const auto to_logical = [this](int value) {
     return MulDiv(value, 96, dpi_);
   };
+  const auto to_logical_ceil = [this](int value) {
+    return std::max(1, (value * 96 + dpi_ - 1) / dpi_);
+  };
+  const int primary_text_height =
+      to_logical_ceil(std::max(body_line_height_, metric_line_height_));
+  const int secondary_text_height = to_logical_ceil(small_line_height_);
   auto overview_layout = CalculateDashboardOverviewLayout(
       to_logical(preferred_top_height), to_logical(overview_width),
-      model.disks.size());
+      model.disks.size(), primary_text_height, secondary_text_height);
   if (!overview_layout.fits && maximum_top_height > preferred_top_height) {
     const auto expanded_layout = CalculateDashboardOverviewLayout(
         to_logical(maximum_top_height), to_logical(overview_width),
-        model.disks.size());
+        model.disks.size(), primary_text_height, secondary_text_height);
     if (expanded_layout.fits ||
         expanded_layout.required_height < overview_layout.required_height) {
       overview_layout = expanded_layout;
@@ -605,8 +643,8 @@ void DashboardRenderer::DrawDashboard(
         std::min(preferred_value_width, available_value_width);
     const int value_left = bounds.left + label_width + column_gap;
     const int bar_left = value_left + value_width + column_gap;
-    const int primary_height =
-        std::min(metric_height, Scale(overview_layout.compact ? 18 : 20));
+    const int primary_height = std::min(
+        metric_height, Scale(overview_layout.primary_line_height));
     const int track_height = std::max(1, Scale(5));
     const int track_y =
         bounds.top + std::max(0, (primary_height - track_height) / 2);

@@ -59,6 +59,7 @@ struct ProcessViewOptions {
 // Keeping this calculation separate from GDI drawing makes the responsive
 // behavior deterministic and unit-testable.
 struct DashboardOverviewLayout {
+  int primary_line_height{};
   int metric_row_height{};
   int disk_row_height{};
   std::size_t disk_columns{1};
@@ -69,7 +70,8 @@ struct DashboardOverviewLayout {
 };
 
 [[nodiscard]] DashboardOverviewLayout CalculateDashboardOverviewLayout(
-    int maximum_height, int overview_width, std::size_t disk_count);
+    int maximum_height, int overview_width, std::size_t disk_count,
+    int primary_text_height, int secondary_text_height);
 
 class DashboardRenderer {
  public:
@@ -138,6 +140,9 @@ class DashboardRenderer {
   HFONT small_font_{};
   HFONT metric_font_{};
   HFONT mono_font_{};
+  int body_line_height_{};
+  int small_line_height_{};
+  int metric_line_height_{};
   std::vector<HitTarget> hit_targets_;
 };
 

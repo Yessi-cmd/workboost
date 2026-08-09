@@ -1148,27 +1148,31 @@ void TestDashboardPresenter() {
 
 void TestDashboardOverviewLayout() {
   const auto regular = workboost::gui::CalculateDashboardOverviewLayout(
-      424, 538, 4);
+      424, 538, 4, 18, 15);
   Check(regular.fits && !regular.compact && regular.disk_columns == 1 &&
-            regular.disk_rows == 4 && regular.required_height == 276,
+            regular.primary_line_height == 20 &&
+            regular.metric_row_height == 38 && regular.disk_rows == 4 &&
+            regular.required_height == 318,
         "four disks should stay in one aligned column when height permits");
 
   const auto constrained = workboost::gui::CalculateDashboardOverviewLayout(
-      274, 389, 8);
+      274, 389, 8, 18, 15);
   Check(constrained.fits && constrained.compact &&
-            constrained.disk_columns == 2 && constrained.disk_rows == 4 &&
+            constrained.primary_line_height == 19 &&
+            constrained.metric_row_height == 35 &&
+            constrained.disk_columns == 3 && constrained.disk_rows == 3 &&
             constrained.required_height == 262,
         "a constrained overview should compact and flow disks into columns");
 
   const auto many_disks = workboost::gui::CalculateDashboardOverviewLayout(
-      424, 538, 26);
+      424, 538, 26, 18, 15);
   Check(many_disks.fits && many_disks.compact &&
-            many_disks.disk_columns == 3 && many_disks.disk_rows == 9 &&
-            many_disks.required_height == 412,
+            many_disks.disk_columns == 4 && many_disks.disk_rows == 7 &&
+            many_disks.required_height == 402,
         "the initial dashboard size should adapt to every drive letter");
 
   const auto empty = workboost::gui::CalculateDashboardOverviewLayout(
-      220, 300, 0);
+      220, 300, 0, 18, 15);
   Check(empty.fits && empty.disk_columns == 1 && empty.disk_rows == 1,
         "an empty disk inventory should reserve one status row");
 }
