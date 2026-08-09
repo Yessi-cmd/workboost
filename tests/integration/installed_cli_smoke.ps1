@@ -185,3 +185,7 @@ if ($helperResult.ExitCode -ne 64) {
 Write-Host ("Installed CLI smoke passed: standalone runtime, " +
     "$($commands.Count) JSON commands, diagnostic recording, comparison, " +
     "and helper validation.")
+# The last native command (the elevated helper) exits 64; without an explicit
+# exit the shell inherits that as the step's exit code even though the test
+# passed. Any earlier failure throws and still fails the step.
+exit 0
