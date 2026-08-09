@@ -45,7 +45,6 @@ else()
 endif()
 
 add_executable(workboost
-  src/app.rc
   src/main.cpp
   src/cli/cli.cpp
 )
