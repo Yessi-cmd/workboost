@@ -1,0 +1,84 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: windows-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  msvc:
+    name: MSVC 2022
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DWORKBOOST_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Install
+        run: cmake --install build --config Release --prefix build/stage
+      - name: Installed CLI smoke
+        shell: pwsh
+        run: |
+          $smoke = (Resolve-Path "$env:GITHUB_WORKSPACE\tests\integration\installed_cli_smoke.ps1").Path
+          Push-Location build/stage
+          try {
+            & $smoke -BinDirectory (Resolve-Path .\bin).Path
+          } finally {
+            Pop-Location
+          }
+
+  mingw:
+    name: MinGW-w64
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          cache: true
+          install: >-
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-ninja
+      - name: Configure, build, test, and install
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G Ninja -DWORKBOOST_BUILD_TESTS=ON
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          cmake --install build --prefix build/stage
+      - name: Installed CLI smoke
+        shell: pwsh
+        run: |
+          $smoke = (Resolve-Path "$env:GITHUB_WORKSPACE\tests\integration\installed_cli_smoke.ps1").Path
+          Push-Location build/stage
+          try {
+            & $smoke -BinDirectory (Resolve-Path .\bin).Path
+          } finally {
+            Pop-Location
+          }

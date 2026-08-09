@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -43,8 +44,18 @@ class UniqueHandle {
 
 std::string WideToUtf8(const std::wstring& value);
 std::wstring Utf8ToWide(const std::string& value);
+std::optional<std::filesystem::path> CurrentExecutablePath(
+    WindowsError* error = nullptr);
 std::filesystem::path ExecutableDirectory();
+std::optional<std::filesystem::path> KnownLocalAppDataDirectory(
+    WindowsError* error = nullptr);
 std::filesystem::path LocalAppDataDirectory();
+std::optional<std::filesystem::path> ProcessImagePath(
+    std::uint32_t pid, WindowsError* error = nullptr);
+bool ProcessIsElevated(std::uint32_t pid, bool* elevated,
+                       WindowsError* error = nullptr);
+bool PathEqualsInsensitive(const std::filesystem::path& left,
+                           const std::filesystem::path& right);
 std::string Iso8601Now();
 std::string JsonEscape(const std::string& value);
 std::string MaskIpAddress(const std::string& address);

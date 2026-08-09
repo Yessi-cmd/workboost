@@ -42,14 +42,16 @@ bool ProtectionPolicy::CanChangePriority(const ProcessSnapshot& process,
                                          const RuntimeContext& context,
                                          bool raise_priority) const {
   const auto level = Evaluate(process, context);
-  if (level == ProtectionLevel::SystemCritical) return false;
+  if (level == ProtectionLevel::SystemCritical ||
+      level == ProtectionLevel::UserExplicit) {
+    return false;
+  }
   if (raise_priority) {
     return process.classification == ProcessClass::Development &&
            config_.coding_profile.foreground_priority.count(
                ToLowerAscii(process.name)) != 0;
   }
-  if (level == ProtectionLevel::Strong ||
-      level == ProtectionLevel::UserExplicit) {
+  if (level == ProtectionLevel::Strong) {
     return false;
   }
   return config_.coding_profile.allow_priority_down.count(
