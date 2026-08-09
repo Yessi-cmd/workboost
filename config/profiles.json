@@ -1,0 +1,24 @@
+{
+  "profiles": {
+    "coding": {
+      "foreground_priority": {
+        "Codex.exe": "above_normal",
+        "Code.exe": "above_normal"
+      },
+      "always_protect": [
+        "ssh.exe",
+        "telnet.exe",
+        "putty.exe",
+        "xshell.exe",
+        "SecureCRT.exe",
+        "WindowsTerminal.exe",
+        "Wireshark.exe",
+        "dumpcap.exe",
+        "tshark.exe",
+        "git.exe"
+      ],
+      "allow_graceful_close": [],
+      "allow_priority_down": []
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "rules": [
+    { "name": "codex.exe", "class": "Development", "protection": "Strong" },
+    { "name": "code.exe", "class": "Development", "protection": "Strong" },
+    { "name": "devenv.exe", "class": "Development", "protection": "Strong" },
+    { "name": "ssh.exe", "class": "RemoteTerminal", "protection": "Strong" },
+    { "name": "telnet.exe", "class": "RemoteTerminal", "protection": "Strong" },
+    { "name": "putty.exe", "class": "RemoteTerminal", "protection": "Strong" },
+    { "name": "xshell.exe", "class": "RemoteTerminal", "protection": "Strong" },
+    { "name": "securecrt.exe", "class": "SerialTerminal", "protection": "Strong" },
+    { "name": "mobaxterm.exe", "class": "RemoteTerminal", "protection": "Strong" },
+    { "name": "windowsterminal.exe", "class": "RemoteTerminal", "protection": "Strong" },
+    { "name": "wireshark.exe", "class": "PacketCapture", "protection": "Strong" },
+    { "name": "dumpcap.exe", "class": "PacketCapture", "protection": "Strong" },
+    { "name": "tshark.exe", "class": "PacketCapture", "protection": "Strong" },
+    { "name": "git.exe", "class": "VersionControl", "protection": "Strong" },
+    { "name": "scp.exe", "class": "VersionControl", "protection": "Strong" },
+    { "name": "sftp.exe", "class": "VersionControl", "protection": "Strong" },
+    { "name": "cmake.exe", "class": "BuildTool", "protection": "Strong" },
+    { "name": "ninja.exe", "class": "BuildTool", "protection": "Strong" },
+    { "name": "msbuild.exe", "class": "BuildTool", "protection": "Strong" },
+    { "name": "make.exe", "class": "BuildTool", "protection": "Strong" },
+    { "name": "python.exe", "class": "BuildTool", "protection": "Strong" },
+    { "name": "wsl.exe", "class": "BuildTool", "protection": "Strong" },
+    { "name": "msmpeng.exe", "class": "Security", "protection": "SystemCritical" },
+    { "name": "searchindexer.exe", "class": "System", "protection": "SystemCritical" }
+  ]
+}

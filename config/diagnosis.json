@@ -1,0 +1,16 @@
+{
+  "sample_interval_ms": 1000,
+  "history_seconds": 60,
+  "remote_debug_ports": [22, 23],
+  "thresholds": {
+    "commit_warning": 0.80,
+    "available_memory_mb": 2048,
+    "page_reads_per_sec": 25,
+    "disk_active_ratio": 0.90,
+    "hdd_latency_ms": 30,
+    "cpu_saturation_ratio": 0.90,
+    "background_io_bytes_per_sec": 10485760,
+    "defender_cpu_ratio": 0.10,
+    "defender_io_ratio": 0.25
+  }
+}
