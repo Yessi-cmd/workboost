@@ -111,7 +111,9 @@ workboost recovery restore
 workboost recovery acknowledge
 ```
 
-不带参数运行 `workboost` 会打开 Dashboard；`workboost gui` 与其等价。Dashboard 的 Refresh 只请求新的只读采样，Export all 会把七个页面的当前脱敏视图写入用户选择的本地文本文件。点击标题栏关闭按钮或最小化会把窗口隐藏到系统托盘，只有托盘菜单中的“退出”才会结束进程；若托盘图标注册失败，窗口会保持可见。Coding Mode 页面只显示实时计划预览，系统修改仍通过 CLI 的强类型动作、二次安全校验与会话持久化链路执行。
+不带参数运行 `workboost` 会打开 Dashboard；`workboost gui` 与其等价。Dashboard 的 Refresh 只请求新的只读采样，Export all 会把七个页面的当前脱敏视图写入用户选择的本地文本文件。点击标题栏关闭按钮或最小化会把窗口隐藏到系统托盘；左键单击托盘图标恢复面板，右键打开包含“打开”和“退出”的菜单，只有其中的“退出”才会结束进程。若托盘图标注册失败，窗口会保持可见。Coding Mode 页面只显示实时计划预览，系统修改仍通过 CLI 的强类型动作、二次安全校验与会话持久化链路执行。
+
+Dashboard 的 Top Impact 按可执行文件名聚合并同时列出 CPU、Private Memory 和 Disk I/O，最终等级取三项中的最高等级。CPU 的 Medium/High 边界为 5%/20%，Private Memory 为 512 MiB/2 GiB；I/O 的 Medium/High 边界分别是 `background_io_bytes_per_sec` 的 0.5 倍和 2 倍，默认即 5 MiB/s 与 20 MiB/s。
 
 `connections` 默认把远端 IPv4 最后一段或 IPv6 后缀替换为掩码。仅在用户明确需要时使用 `--show-remote-ip`。
 

@@ -107,21 +107,52 @@ std::vector<const ProcessSnapshot*> SortedProcesses(
   return processes;
 }
 
-ImpactLevel ProcessImpact(const Config& config,
-                          const ProcessSnapshot& process) {
-  const double io = process.IoBytesPerSec();
+int ImpactRank(ImpactLevel impact) {
+  switch (impact) {
+    case ImpactLevel::High: return 2;
+    case ImpactLevel::Medium: return 1;
+    case ImpactLevel::Low: return 0;
+  }
+  return 0;
+}
+
+struct ImpactBreakdown {
+  ImpactLevel cpu{ImpactLevel::Low};
+  ImpactLevel memory{ImpactLevel::Low};
+  ImpactLevel io{ImpactLevel::Low};
+  ImpactLevel overall{ImpactLevel::Low};
+};
+
+ImpactLevel ThresholdImpact(double value, double medium, double high) {
+  if (value >= high) return ImpactLevel::High;
+  if (value >= medium) return ImpactLevel::Medium;
+  return ImpactLevel::Low;
+}
+
+ImpactBreakdown CalculateImpact(const Config& config, double cpu_percent,
+                                std::uint64_t private_bytes,
+                                double io_bytes_per_sec) {
   const double high_io =
       std::max(1.0, config.thresholds.background_io_bytes_per_sec * 2.0);
   const double medium_io = high_io * 0.25;
-  if (io >= high_io || process.cpu_percent >= 20.0 ||
-      process.private_bytes >= 2ULL * 1024 * 1024 * 1024) {
-    return ImpactLevel::High;
-  }
-  if (io >= medium_io || process.cpu_percent >= 5.0 ||
-      process.private_bytes >= 512ULL * 1024 * 1024) {
-    return ImpactLevel::Medium;
-  }
-  return ImpactLevel::Low;
+  ImpactBreakdown result;
+  result.cpu = ThresholdImpact(cpu_percent, 5.0, 20.0);
+  result.memory = ThresholdImpact(static_cast<double>(private_bytes),
+                                  512.0 * kMiB, 2.0 * kGiB);
+  result.io = ThresholdImpact(io_bytes_per_sec, medium_io, high_io);
+  result.overall =
+      std::max({result.cpu, result.memory, result.io},
+               [](ImpactLevel left, ImpactLevel right) {
+                 return ImpactRank(left) < ImpactRank(right);
+               });
+  return result;
+}
+
+ImpactLevel ProcessImpact(const Config& config,
+                          const ProcessSnapshot& process) {
+  return CalculateImpact(config, process.cpu_percent, process.private_bytes,
+                         process.IoBytesPerSec())
+      .overall;
 }
 
 std::string WorkloadCategory(ProcessClass value) {
@@ -651,6 +682,46 @@ DashboardViewModel DashboardPresenter::Build(
     }
     model.diagnoses.push_back(std::move(view));
   }
+  std::unordered_map<std::string, std::size_t> top_impact_by_name;
+  for (const auto& process : snapshot.processes) {
+    const auto [position, inserted] =
+        top_impact_by_name.emplace(process.name, model.top_impacts.size());
+    if (inserted) {
+      TopImpactViewModel view;
+      view.name = process.name;
+      model.top_impacts.push_back(std::move(view));
+    }
+    auto& aggregate = model.top_impacts[position->second];
+    aggregate.cpu_percent += process.cpu_percent;
+    aggregate.private_bytes += process.private_bytes;
+    aggregate.io_bytes_per_sec += process.IoBytesPerSec();
+  }
+  for (auto& process : model.top_impacts) {
+    const auto impact = CalculateImpact(config, process.cpu_percent,
+                                        process.private_bytes,
+                                        process.io_bytes_per_sec);
+    process.cpu_impact = impact.cpu;
+    process.memory_impact = impact.memory;
+    process.io_impact = impact.io;
+    process.impact = impact.overall;
+  }
+  std::stable_sort(
+      model.top_impacts.begin(), model.top_impacts.end(),
+      [](const TopImpactViewModel& left, const TopImpactViewModel& right) {
+        if (ImpactRank(left.impact) != ImpactRank(right.impact)) {
+          return ImpactRank(left.impact) > ImpactRank(right.impact);
+        }
+        if (left.io_bytes_per_sec != right.io_bytes_per_sec) {
+          return left.io_bytes_per_sec > right.io_bytes_per_sec;
+        }
+        if (left.cpu_percent != right.cpu_percent) {
+          return left.cpu_percent > right.cpu_percent;
+        }
+        if (left.private_bytes != right.private_bytes) {
+          return left.private_bytes > right.private_bytes;
+        }
+        return left.name < right.name;
+      });
   const auto sorted_processes = SortedProcesses(snapshot);
   const std::size_t process_count =
       std::min<std::size_t>(200, sorted_processes.size());

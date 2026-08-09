@@ -1146,6 +1146,57 @@ void TestDashboardPresenter() {
         "dashboard must mask remote IP addresses by default");
 }
 
+void TestDashboardTopImpactMetrics() {
+  Config config = Config::Defaults();
+  SystemSnapshot snapshot;
+  snapshot.timestamp = std::chrono::system_clock::now();
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  ProcessSnapshot io_first;
+  io_first.pid = 101;
+  io_first.name = "io-worker.exe";
+  io_first.read_bytes_per_sec = 3.0 * 1024 * 1024;
+  snapshot.processes.push_back(io_first);
+  ProcessSnapshot io_second = io_first;
+  io_second.pid = 102;
+  snapshot.processes.push_back(io_second);
+
+  ProcessSnapshot terminal_first;
+  terminal_first.pid = 201;
+  terminal_first.name = "terminal.exe";
+  terminal_first.cpu_percent = 3.0;
+  terminal_first.private_bytes = 300ULL * 1024 * 1024;
+  snapshot.processes.push_back(terminal_first);
+  ProcessSnapshot terminal_second = terminal_first;
+  terminal_second.pid = 202;
+  snapshot.processes.push_back(terminal_second);
+
+  SnapshotHistory history(4);
+  history.Add(snapshot);
+  const auto model = workboost::gui::DashboardPresenter::Build(
+      config, snapshot, history, {}, {}, std::nullopt, "");
+  Check(model.top_impacts.size() == 2,
+        "Top Impact must aggregate processes with the same executable name");
+  const auto& io = model.top_impacts[0];
+  const auto& terminal = model.top_impacts[1];
+  Check(io.name == "io-worker.exe" &&
+            io.io_bytes_per_sec == 6.0 * 1024 * 1024 &&
+            io.cpu_impact == workboost::gui::ImpactLevel::Low &&
+            io.memory_impact == workboost::gui::ImpactLevel::Low &&
+            io.io_impact == workboost::gui::ImpactLevel::Medium &&
+            io.impact == workboost::gui::ImpactLevel::Medium,
+        "aggregated I/O must determine the displayed impact level");
+  Check(terminal.name == "terminal.exe" && terminal.cpu_percent == 6.0 &&
+            terminal.private_bytes == 600ULL * 1024 * 1024 &&
+            terminal.io_bytes_per_sec == 0.0 &&
+            terminal.cpu_impact == workboost::gui::ImpactLevel::Medium &&
+            terminal.memory_impact == workboost::gui::ImpactLevel::Medium &&
+            terminal.io_impact == workboost::gui::ImpactLevel::Low &&
+            terminal.impact == workboost::gui::ImpactLevel::Medium,
+        "a zero-I/O Medium row must expose its CPU and memory triggers");
+}
+
 void TestDashboardOverviewLayout() {
   const auto regular = workboost::gui::CalculateDashboardOverviewLayout(
       424, 538, 4, 18, 15);
@@ -1193,6 +1244,15 @@ void TestDashboardCloseBehavior() {
                                   false) ==
                 DashboardCloseDisposition::Exit,
         "only an idle explicit tray command may exit WorkBoost");
+
+  const auto left_click = workboost::gui::DecodeDashboardTrayNotification(
+      static_cast<std::uintptr_t>(MAKELPARAM(WM_LBUTTONUP, 1)), true);
+  const auto right_click = workboost::gui::DecodeDashboardTrayNotification(
+      static_cast<std::uintptr_t>(MAKELPARAM(WM_RBUTTONUP, 1)), true);
+  Check(left_click.event_code == WM_LBUTTONUP && left_click.icon_id == 1 &&
+            right_click.event_code == WM_RBUTTONUP &&
+            right_click.icon_id == 1,
+        "version 4 tray callbacks must decode their packed event and icon ID");
 }
 
 void TestDashboardRendererHitTargets() {
@@ -2026,6 +2086,7 @@ int main() {
       {"passive startup benchmark timeout",
        TestPassiveStartupBenchmarkTimeout},
       {"dashboard presenter", TestDashboardPresenter},
+      {"dashboard Top Impact metrics", TestDashboardTopImpactMetrics},
       {"dashboard overview responsive layout", TestDashboardOverviewLayout},
       {"dashboard close behavior", TestDashboardCloseBehavior},
       {"dashboard renderer hit targets", TestDashboardRendererHitTargets},

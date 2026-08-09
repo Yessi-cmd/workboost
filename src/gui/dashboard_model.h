@@ -75,6 +75,17 @@ struct ProcessViewModel {
   bool protected_workload{};
 };
 
+struct TopImpactViewModel {
+  std::string name;
+  double cpu_percent{};
+  std::uint64_t private_bytes{};
+  double io_bytes_per_sec{};
+  ImpactLevel cpu_impact{ImpactLevel::Low};
+  ImpactLevel memory_impact{ImpactLevel::Low};
+  ImpactLevel io_impact{ImpactLevel::Low};
+  ImpactLevel impact{ImpactLevel::Low};
+};
+
 struct ProtectedWorkloadViewModel {
   std::string category;
   std::string name;
@@ -164,6 +175,7 @@ struct DashboardViewModel {
   std::vector<DiskViewModel> disks;
   std::vector<DiagnosisViewModel> diagnoses;
   std::vector<ProcessViewModel> processes;
+  std::vector<TopImpactViewModel> top_impacts;
   std::vector<ProtectedWorkloadViewModel> protected_workloads;
   CodingModeViewModel coding_mode;
   RecoveryViewModel recovery;

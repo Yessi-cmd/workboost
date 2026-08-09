@@ -628,7 +628,7 @@ class DashboardWindow {
     lstrcpynW(tray_icon_.szInfoTitle, L"WorkBoost",
               ARRAYSIZE(tray_icon_.szInfoTitle));
     const std::wstring tip = windows::Utf8ToWide(Locale::Get(
-        "WorkBoost is still running. Double-click the tray icon to open the "
+        "WorkBoost is still running. Click the tray icon to open the "
         "dashboard."));
     lstrcpynW(tray_icon_.szInfo, tip.c_str(), ARRAYSIZE(tray_icon_.szInfo));
     tray_icon_.dwInfoFlags = NIIF_INFO;
@@ -668,8 +668,9 @@ class DashboardWindow {
     POINT cursor{};
     GetCursorPos(&cursor);
     const UINT command = static_cast<UINT>(TrackPopupMenu(
-        tray_menu_, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN, cursor.x,
-        cursor.y, 0, window_, nullptr));
+        tray_menu_,
+        TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+        cursor.x, cursor.y, 0, window_, nullptr));
     PostMessageW(window_, WM_NULL, 0, 0);
     if (command == kTrayMenuOpen) {
       RestoreFromTray();
@@ -692,11 +693,21 @@ class DashboardWindow {
   }
 
   void HandleTrayNotification(LPARAM lparam) {
-    switch (static_cast<UINT>(lparam)) {
+    const auto notification = DecodeDashboardTrayNotification(
+        static_cast<std::uintptr_t>(lparam),
+        tray_icon_.uVersion == NOTIFYICON_VERSION_4);
+    if (notification.icon_id != 0 && notification.icon_id != kTrayIconId) {
+      return;
+    }
+    switch (notification.event_code) {
+      case WM_LBUTTONUP:
       case WM_LBUTTONDBLCLK:
+      case NIN_SELECT:
+      case NIN_KEYSELECT:
         RestoreFromTray();
         break;
       case WM_RBUTTONUP:
+      case WM_CONTEXTMENU:
         ShowTrayMenu();
         break;
       default:

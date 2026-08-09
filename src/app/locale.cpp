@@ -49,6 +49,7 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
         {"Top Impact", "高影响进程"},
         {"CPU", "CPU"},
         {"Memory", "内存"},
+        {"Impact", "影响"},
         {"Commit", "提交内存"},
         {"{0} available", "{0} 可用"},
         {"{0} page reads/s", "{0} 页读取/秒"},
@@ -174,9 +175,9 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
         // Tray and export.
         {"Open WorkBoost", "打开 WorkBoost"},
         {"Exit", "退出"},
-        {"WorkBoost is still running. Double-click the tray icon to open the "
+        {"WorkBoost is still running. Click the tray icon to open the "
          "dashboard.",
-         "WorkBoost 仍在运行。双击托盘图标打开仪表盘。"},
+         "WorkBoost 仍在运行。单击托盘图标打开仪表盘。"},
         {"Wait for the first sample before exporting.",
          "请等待首次采样后再导出。"},
         {"Dashboard report exported.", "仪表盘报告已导出。"},

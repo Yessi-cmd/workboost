@@ -12,7 +12,6 @@
 #include <sstream>
 #include <string>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -820,68 +819,77 @@ void DashboardRenderer::DrawDashboard(
                     impact_panel.top + Scale(9), impact_panel.right,
                     impact_panel.top + Scale(36)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-  struct ImpactAggregate {
-    std::string name;
-    double io_bytes_per_sec{};
-    double cpu_percent{};
-    ImpactLevel impact{ImpactLevel::Low};
-  };
-  std::vector<ImpactAggregate> impact_processes;
-  std::unordered_map<std::string, std::size_t> impact_by_name;
-  for (const auto& process : model.processes) {
-    const auto [position, inserted] =
-        impact_by_name.emplace(process.name, impact_processes.size());
-    if (inserted) {
-      impact_processes.push_back(
-          ImpactAggregate{process.name, 0.0, 0.0, ImpactLevel::Low});
-    }
-    auto& aggregate = impact_processes[position->second];
-    aggregate.io_bytes_per_sec +=
-        process.read_bytes_per_sec + process.write_bytes_per_sec;
-    aggregate.cpu_percent += process.cpu_percent;
-    if (ImpactRank(process.impact) > ImpactRank(aggregate.impact)) {
-      aggregate.impact = process.impact;
-    }
-  }
-  std::stable_sort(impact_processes.begin(), impact_processes.end(),
-                   [](const auto& left, const auto& right) {
-                     if (ImpactRank(left.impact) != ImpactRank(right.impact)) {
-                       return ImpactRank(left.impact) > ImpactRank(right.impact);
-                     }
-                     return left.io_bytes_per_sec != right.io_bytes_per_sec
-                                ? left.io_bytes_per_sec > right.io_bytes_per_sec
-                                : left.cpu_percent > right.cpu_percent;
-                   });
-  int impact_y = impact_panel.top + Scale(42);
-  const std::size_t impact_capacity = static_cast<std::size_t>(std::max(
-      0, (Height(impact_panel) - Scale(42)) / Scale(28)));
+  const int impact_left = impact_panel.left + panel_margin;
+  const int impact_right = impact_panel.right - panel_margin;
+  const int impact_width = std::max(0, impact_right - impact_left);
+  const int name_right = impact_left + impact_width * 38 / 100;
+  const int cpu_right = impact_left + impact_width * 51 / 100;
+  const int memory_right = impact_left + impact_width * 68 / 100;
+  const int io_right = impact_left + impact_width * 86 / 100;
+  const int header_top = impact_panel.top + Scale(34);
+  const int header_bottom = header_top + Scale(16);
+  const int column_gap = Scale(5);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Name"),
+           MakeRect(impact_left, header_top, name_right - column_gap,
+                    header_bottom),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("CPU"),
+           MakeRect(name_right, header_top, cpu_right - column_gap,
+                    header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Memory"),
+           MakeRect(cpu_right, header_top, memory_right - column_gap,
+                    header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Disk I/O"),
+           MakeRect(memory_right, header_top, io_right - column_gap,
+                    header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Impact"),
+           MakeRect(io_right, header_top, impact_right, header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+  int impact_y = header_bottom;
+  const int impact_row_height = Scale(28);
+  const int available_impact_height =
+      std::max(0, static_cast<int>(impact_panel.bottom) - impact_y);
+  const std::size_t impact_capacity =
+      static_cast<std::size_t>(available_impact_height / impact_row_height);
   const std::size_t impact_count =
-      std::min({std::size_t{3}, impact_processes.size(), impact_capacity});
+      std::min({std::size_t{3}, model.top_impacts.size(), impact_capacity});
   for (std::size_t i = 0; i < impact_count; ++i) {
-    const auto& process = impact_processes[i];
+    const auto& process = model.top_impacts[i];
     DrawUtf8(dc, body_font_, kPrimaryText, process.name,
-             MakeRect(impact_panel.left + panel_margin, impact_y,
-                      impact_panel.left + static_cast<int>(Width(impact_panel) * 0.48),
-                      impact_y + Scale(26)),
+             MakeRect(impact_left, impact_y, name_right - column_gap,
+                      impact_y + impact_row_height),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    DrawUtf8(dc, metric_font_, kSecondaryText,
+    DrawUtf8(dc, metric_font_, ImpactColor(process.cpu_impact),
+             FormatPercent(process.cpu_percent),
+             MakeRect(name_right, impact_y, cpu_right - column_gap,
+                      impact_y + impact_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, ImpactColor(process.memory_impact),
+             FormatBytes(static_cast<double>(process.private_bytes)),
+             MakeRect(cpu_right, impact_y, memory_right - column_gap,
+                      impact_y + impact_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, ImpactColor(process.io_impact),
              FormatRate(process.io_bytes_per_sec),
-             MakeRect(impact_panel.left + static_cast<int>(Width(impact_panel) * 0.48),
-                      impact_y, impact_panel.right - Scale(74),
-                      impact_y + Scale(26)),
+             MakeRect(memory_right, impact_y, io_right - column_gap,
+                      impact_y + impact_row_height),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawUtf8(dc, small_font_, ImpactColor(process.impact),
-             ImpactText(process.impact),
-             MakeRect(impact_panel.right - Scale(66), impact_y,
-                      impact_panel.right - panel_margin, impact_y + Scale(26)),
+             Locale::Get(ImpactText(process.impact)),
+             MakeRect(io_right, impact_y, impact_right,
+                      impact_y + impact_row_height),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    impact_y += Scale(28);
+    impact_y += impact_row_height;
   }
-  if (impact_processes.empty()) {
+  if (model.top_impacts.empty()) {
     DrawUtf8(dc, small_font_, kMutedText,
              Locale::Get("No process inventory available"),
-             MakeRect(impact_panel.left + panel_margin, impact_y,
-                      impact_panel.right - panel_margin, impact_y + Scale(28)),
+             MakeRect(impact_left, impact_y, impact_right,
+                      impact_y + impact_row_height),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
 
