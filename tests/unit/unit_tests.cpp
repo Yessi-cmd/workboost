@@ -1145,6 +1145,33 @@ void TestDashboardPresenter() {
         "dashboard must mask remote IP addresses by default");
 }
 
+void TestDashboardOverviewLayout() {
+  const auto regular = workboost::gui::CalculateDashboardOverviewLayout(
+      424, 538, 4);
+  Check(regular.fits && !regular.compact && regular.disk_columns == 1 &&
+            regular.disk_rows == 4 && regular.required_height == 308,
+        "four disks should stay in one aligned column when height permits");
+
+  const auto constrained = workboost::gui::CalculateDashboardOverviewLayout(
+      274, 389, 8);
+  Check(constrained.fits && constrained.compact &&
+            constrained.disk_columns == 3 && constrained.disk_rows == 3 &&
+            constrained.required_height == 260,
+        "a constrained overview should compact and flow disks into columns");
+
+  const auto many_disks = workboost::gui::CalculateDashboardOverviewLayout(
+      424, 538, 26);
+  Check(many_disks.fits && many_disks.compact &&
+            many_disks.disk_columns == 4 && many_disks.disk_rows == 7 &&
+            many_disks.required_height == 380,
+        "the initial dashboard size should adapt to every drive letter");
+
+  const auto empty = workboost::gui::CalculateDashboardOverviewLayout(
+      220, 300, 0);
+  Check(empty.fits && empty.disk_columns == 1 && empty.disk_rows == 1,
+        "an empty disk inventory should reserve one status row");
+}
+
 void TestDashboardRendererHitTargets() {
   HWND window = CreateWindowExW(0, L"STATIC", L"WorkBoost renderer test",
                                 WS_POPUP, 0, 0, 32, 32, nullptr, nullptr,
@@ -1159,17 +1186,44 @@ void TestDashboardRendererHitTargets() {
 
   workboost::gui::DashboardRenderer renderer;
   Check(renderer.Initialize(window), "native dashboard renderer should initialize");
-  HDC dc = GetDC(window);
-  Check(dc != nullptr, "renderer test device context should be available");
-  const int dpi = std::max(96, GetDeviceCaps(dc, LOGPIXELSX));
+  HDC window_dc = GetDC(window);
+  Check(window_dc != nullptr,
+        "renderer test device context should be available");
+  const int dpi = std::max(96, GetDeviceCaps(window_dc, LOGPIXELSX));
   const RECT bounds{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
+  HDC dc = CreateCompatibleDC(window_dc);
+  HBITMAP bitmap =
+      CreateCompatibleBitmap(window_dc, bounds.right, bounds.bottom);
+  Check(dc != nullptr && bitmap != nullptr,
+        "renderer test back buffer should be created");
+  const HGDIOBJ previous_bitmap = SelectObject(dc, bitmap);
   workboost::gui::DashboardViewModel model;
   model.mode = "Monitor Mode";
+  model.system.cpu_percent = 25.0;
   model.system.memory_total_bytes = 1;
   const std::optional<workboost::gui::DashboardViewModel> optional_model{model};
   renderer.Paint(dc, bounds, optional_model,
                  workboost::gui::DashboardPage::Dashboard, std::nullopt, "");
-  ReleaseDC(window, dc);
+
+  const auto scale = [dpi](int value) { return MulDiv(value, dpi, 96); };
+  const int cpu_row_top = scale(72) + scale(24) + scale(44);
+  const int cpu_bar_left = scale(200) + scale(24) + scale(16) + scale(72) +
+                           scale(12) + scale(170) + scale(12);
+  const int aligned_track_y =
+      cpu_row_top + (scale(20) - scale(5)) / 2 + scale(2);
+  const int former_track_y = cpu_row_top + scale(15) + scale(2);
+  const int track_x = cpu_bar_left + scale(10);
+  const COLORREF aligned_color = GetPixel(dc, track_x, aligned_track_y);
+  const COLORREF former_color = GetPixel(dc, track_x, former_track_y);
+
+  SelectObject(dc, previous_bitmap);
+  DeleteObject(bitmap);
+  DeleteDC(dc);
+  ReleaseDC(window, window_dc);
+  Check(aligned_color == RGB(48, 104, 189) &&
+            former_color == RGB(255, 255, 255),
+        "CPU progress must share the primary text row instead of sitting "
+        "below it");
 
   const POINT process_navigation{MulDiv(50, dpi, 96),
                                  MulDiv(150, dpi, 96)};
@@ -1949,6 +2003,7 @@ int main() {
       {"passive startup benchmark timeout",
        TestPassiveStartupBenchmarkTimeout},
       {"dashboard presenter", TestDashboardPresenter},
+      {"dashboard overview responsive layout", TestDashboardOverviewLayout},
       {"dashboard renderer hit targets", TestDashboardRendererHitTargets},
       {"dashboard language toggle target",
        TestDashboardLanguageToggleTarget},

@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -53,6 +54,23 @@ struct ProcessViewOptions {
   std::uint32_t selected_pid{};
   bool search_focused{};
 };
+
+// Device-independent geometry for the variable-length System Overview list.
+// Keeping this calculation separate from GDI drawing makes the responsive
+// behavior deterministic and unit-testable.
+struct DashboardOverviewLayout {
+  int metric_row_height{};
+  int subtitle_height{};
+  int disk_row_height{};
+  std::size_t disk_columns{1};
+  std::size_t disk_rows{1};
+  int required_height{};
+  bool compact{};
+  bool fits{};
+};
+
+[[nodiscard]] DashboardOverviewLayout CalculateDashboardOverviewLayout(
+    int maximum_height, int overview_width, std::size_t disk_count);
 
 class DashboardRenderer {
  public:
