@@ -538,6 +538,11 @@ bool Config::LoadDirectory(const std::filesystem::path& directory,
                   &coding_profile.always_protect_services);
     LoadStringSet(json, "allow_service_stop",
                   &coding_profile.allow_service_stop);
+    if (const auto value = ReadNumber(json, "graceful_close_batch_budget_ms")) {
+      coding_profile.graceful_close_batch_budget_ms =
+          static_cast<std::uint32_t>(
+              std::clamp(*value, 1000.0, 30000.0));
+    }
   }
 
   const auto rules_path = directory / "process_rules.json";

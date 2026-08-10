@@ -3,6 +3,9 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -122,9 +125,9 @@ bool ProcessActionApi::RestorePriority(
   return true;
 }
 
-GracefulCloseResult ProcessActionApi::RequestGracefulClose(
+GracefulCloseResult RequestGracefulCloseWithDeadline(
     std::uint32_t pid, std::uint64_t expected_start_time_100ns,
-    std::uint32_t timeout_ms) {
+    ULONGLONG deadline) {
   GracefulCloseResult result;
   UniqueHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
                                    FALSE, pid));
@@ -148,8 +151,6 @@ GracefulCloseResult ProcessActionApi::RequestGracefulClose(
     result.error = LastError("EnumWindows for graceful close");
     return result;
   }
-  const DWORD bounded_timeout = std::clamp<DWORD>(timeout_ms, 100, 5000);
-  const ULONGLONG deadline = GetTickCount64() + bounded_timeout;
   DWORD last_error = ERROR_SUCCESS;
   for (const HWND window : context.windows) {
     if (OwnsForegroundWindow(pid)) {
@@ -196,6 +197,60 @@ GracefulCloseResult ProcessActionApi::RequestGracefulClose(
     return result;
   }
   result.success = true;
+  return result;
+}
+
+GracefulCloseResult ProcessActionApi::RequestGracefulClose(
+    std::uint32_t pid, std::uint64_t expected_start_time_100ns,
+    std::uint32_t timeout_ms) {
+  const DWORD bounded_timeout = std::clamp<DWORD>(timeout_ms, 100, 5000);
+  return RequestGracefulCloseWithDeadline(
+      pid, expected_start_time_100ns, GetTickCount64() + bounded_timeout);
+}
+
+GracefulCloseBatchResult ProcessActionApi::RequestGracefulCloseBatch(
+    const std::vector<GracefulCloseRequest>& requests,
+    std::uint32_t shared_timeout_ms) {
+  constexpr std::size_t kMaximumBatchSize = 64;
+  constexpr std::size_t kMaximumWorkerThreads = 16;
+  GracefulCloseBatchResult result;
+  if (requests.empty() || requests.size() > kMaximumBatchSize) {
+    result.error = LastError("Validate graceful close batch",
+                             ERROR_INVALID_PARAMETER);
+    return result;
+  }
+  const DWORD bounded_timeout =
+      std::clamp<DWORD>(shared_timeout_ms, 100, 30000);
+  const ULONGLONG deadline = GetTickCount64() + bounded_timeout;
+  result.results.resize(requests.size());
+  std::atomic<std::size_t> next{0};
+  const std::size_t worker_count =
+      std::min<std::size_t>(kMaximumWorkerThreads, requests.size());
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+  try {
+    for (std::size_t worker = 0; worker < worker_count; ++worker) {
+      workers.emplace_back([&requests, &result, &next, deadline] {
+        for (;;) {
+          const std::size_t index = next.fetch_add(1);
+          if (index >= requests.size()) return;
+          result.results[index] = RequestGracefulCloseWithDeadline(
+              requests[index].pid,
+              requests[index].expected_start_time_100ns, deadline);
+        }
+      });
+    }
+  } catch (...) {
+    result.error = LastError("Start graceful close batch workers",
+                             ERROR_NOT_ENOUGH_MEMORY);
+  }
+  for (auto& worker : workers) {
+    if (worker.joinable()) worker.join();
+  }
+  if (result.error.code != 0) {
+    result.results.clear();
+    return result;
+  }
   return result;
 }
 

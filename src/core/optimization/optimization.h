@@ -79,8 +79,16 @@ class OptimizationPlanner {
   [[nodiscard]] OptimizationPlan Create(
       const SystemSnapshot& snapshot,
       const std::vector<ProcessSelection>& explicit_close = {}) const;
+  [[nodiscard]] OptimizationPlan Create(
+      const SnapshotHistory& history,
+      const std::vector<ProcessSelection>& explicit_close = {}) const;
 
  private:
+  [[nodiscard]] OptimizationPlan CreateFrom(
+      const SystemSnapshot& snapshot, const RuntimeContext& context,
+      bool window_coverage_ok,
+      const std::vector<ProcessSelection>& explicit_close) const;
+
   const Config& config_;
 };
 
@@ -101,6 +109,13 @@ class ActionExecutor {
 
   ExecutedAction Execute(const OptimizationAction& action,
                          const SystemSnapshot& current_snapshot) const;
+  // Validates and sends WM_CLOSE for every action in one shared deadline.
+  // Results preserve input order; rejected actions stay Rejected and are not
+  // sent. Only GracefulCloseProcess actions are accepted.
+  std::vector<ExecutedAction> ExecuteGracefulCloseBatch(
+      const std::vector<OptimizationAction>& actions,
+      const SystemSnapshot& current_snapshot,
+      std::uint32_t shared_timeout_ms) const;
   bool Rollback(ExecutedAction* action) const;
 
  private:

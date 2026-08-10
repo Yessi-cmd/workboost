@@ -904,4 +904,45 @@ DashboardViewModel DashboardPresenter::Build(
   return model;
 }
 
+std::vector<ProcessSelection> ParseUnclosedProcessSelections(
+    const std::string& output) {
+  constexpr const char* kPrefix = "UNCLOSED_PROCESS ";
+  std::vector<ProcessSelection> selections;
+  std::istringstream stream(output);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (line.rfind(kPrefix, 0) != 0) continue;
+    const auto parse_number = [&line](const std::string& key,
+                                      std::uint64_t* value) {
+      const std::size_t key_position = line.find(key);
+      if (key_position == std::string::npos) return false;
+      const std::size_t start = key_position + key.size();
+      std::size_t end = start;
+      while (end < line.size() && line[end] >= '0' && line[end] <= '9') {
+        ++end;
+      }
+      if (end == start) return false;
+      try {
+        *value = std::stoull(line.substr(start, end - start));
+      } catch (...) {
+        return false;
+      }
+      return true;
+    };
+    std::uint64_t pid = 0;
+    std::uint64_t start_time = 0;
+    if (!parse_number("pid=", &pid) || !parse_number("start=", &start_time) ||
+        pid == 0 || pid > UINT32_MAX || start_time == 0) {
+      continue;
+    }
+    const ProcessSelection selection{
+        static_cast<std::uint32_t>(pid), start_time};
+    if (std::find(selections.begin(), selections.end(), selection) ==
+        selections.end()) {
+      selections.push_back(selection);
+    }
+  }
+  return selections;
+}
+
 }  // namespace workboost::gui

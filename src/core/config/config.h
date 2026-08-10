@@ -41,6 +41,10 @@ struct CodingProfile {
   std::unordered_set<std::string> allow_priority_down;
   std::unordered_set<std::string> always_protect_services;
   std::unordered_set<std::string> allow_service_stop;
+  // One shared WM_CLOSE deadline for all cleanup-pool processes when Coding
+  // Mode enters or retries. Individual actions keep their own allowlisted
+  // timeout as an upper bound per target window.
+  std::uint32_t graceful_close_batch_budget_ms{5000};
 };
 
 class Config {

@@ -20,7 +20,8 @@
       "allow_graceful_close": [],
       "allow_priority_down": [],
       "always_protect_services": [],
-      "allow_service_stop": []
+      "allow_service_stop": [],
+      "graceful_close_batch_budget_ms": 5000
     }
   }
 }

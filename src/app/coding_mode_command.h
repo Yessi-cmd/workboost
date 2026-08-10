@@ -9,7 +9,7 @@
 
 namespace workboost {
 
-enum class CodingModeCommand { Enter, Exit, Restore };
+enum class CodingModeCommand { Enter, Exit, Restore, RetryClose };
 
 struct CodingModeCommandResult {
   bool launched{};

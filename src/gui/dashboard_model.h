@@ -205,4 +205,10 @@ class DashboardPresenter {
       const std::string& report_error = {});
 };
 
+// Parses the stable "UNCLOSED_PROCESS pid=... start=... name=..." lines that
+// `coding exit` emits for processes still running after WM_CLOSE. The name is
+// display-only; the returned selections carry PID + start time for revalidation.
+[[nodiscard]] std::vector<ProcessSelection> ParseUnclosedProcessSelections(
+    const std::string& output);
+
 }  // namespace workboost::gui

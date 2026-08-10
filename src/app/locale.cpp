@@ -109,6 +109,19 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
          "正在恢复可逆操作并验证系统状态…"},
         {"Restoring the unfinished session and verifying system state...",
          "正在恢复未完成的会话并验证系统状态…"},
+        {"Retrying graceful close for unclosed processes...",
+         "正在对退出后仍运行的进程重新发送关闭请求…"},
+        {"Cleanup retry completed.", "清理重试已完成。"},
+        {"Cleanup retry completed. Revalidation, session persistence, and "
+         "reporting used the standard Coding Mode path.",
+         "清理重试已完成。重新校验、会话持久化与报告均使用标准编码模式链路。"},
+        {"Cleanup Retry", "清理重试"},
+        {"Retry Cleanup", "重试清理"},
+        {"Cleanup processes kept running.", "清理进程保持运行。"},
+        {"{0} cleanup process(es) are still running after exit:\r\n{1}\r\n"
+         "Retry graceful close now? Choosing No keeps them running.",
+         "退出后仍有 {0} 个清理进程在运行：\r\n{1}\r\n"
+         "是否立即重新发送关闭请求？选择“否”则保持这些进程运行。"},
         {"Apply the reviewed Coding Mode plan?\n\n{0} planned action(s)\n{1} "
          "cleanup process(es)\n{2} protected workload(s)\n\nA 10-second "
          "baseline is captured first. "

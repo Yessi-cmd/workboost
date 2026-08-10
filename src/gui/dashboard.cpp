@@ -571,7 +571,9 @@ class DashboardWindow {
     model->coding_mode.operation_status = coding_operation_status_;
   }
 
-  void StartCodingCommand(CodingModeCommand command) {
+  void StartCodingCommand(
+      CodingModeCommand command,
+      const std::vector<ProcessSelection>& explicit_selections = {}) {
     if (coding_command_running_.exchange(true)) return;
     if (coding_worker_.joinable()) coding_worker_.join();
 
@@ -590,15 +592,23 @@ class DashboardWindow {
         coding_operation_status_ = Locale::Get(
             "Restoring the unfinished session and verifying system state...");
         break;
+      case CodingModeCommand::RetryClose:
+        coding_operation_status_ = Locale::Get(
+            "Retrying graceful close for unclosed processes...");
+        break;
     }
     status_message_ = coding_operation_status_;
     if (latest_model_) ApplyCodingOperationState(&*latest_model_);
     InvalidateRect(window_, nullptr, FALSE);
 
-    const std::vector<ProcessSelection> cleanup_processes =
-        command == CodingModeCommand::Enter
-            ? cleanup_processes_
-            : std::vector<ProcessSelection>{};
+    std::vector<ProcessSelection> cleanup_processes;
+    if (command == CodingModeCommand::Enter) {
+      cleanup_processes = explicit_selections.empty()
+                              ? cleanup_processes_
+                              : explicit_selections;
+    } else if (command == CodingModeCommand::RetryClose) {
+      cleanup_processes = explicit_selections;
+    }
     try {
       coding_worker_ = std::thread([this, command, cleanup_processes] {
         CodingModeCommandResult result;
@@ -651,28 +661,58 @@ class DashboardWindow {
         cleanup_processes_.clear();
         cleanup_pool_scroll_offset_ = 0;
       }
-      status_message_ = entered
-                            ? Locale::Get("Coding Mode is active.")
-                            : Locale::Get("System state was restored "
-                                          "successfully.");
+      if (entered) {
+        status_message_ = Locale::Get("Coding Mode is active.");
+      } else if (active_coding_command_ == CodingModeCommand::RetryClose) {
+        status_message_ = Locale::Get("Cleanup retry completed.");
+      } else {
+        status_message_ =
+            Locale::Get("System state was restored successfully.");
+      }
       current_page_ = entered ? DashboardPage::CodingMode
                               : DashboardPage::Dashboard;
-      MessageBoxW(window_,
-                  windows::Utf8ToWide(
-                      entered
-                          ? Locale::Get(
-                                "Coding Mode is active. WorkBoost recorded "
-                                "every applied action for deterministic "
-                                "rollback.")
-                          : Locale::Get(
-                                "The reversible session was restored and "
-                                "verified."))
-                      .c_str(),
-                  windows::Utf8ToWide(
-                      Locale::Get(entered ? "Coding Mode active"
-                                          : "Recovery complete"))
-                      .c_str(),
-                  MB_OK | MB_ICONINFORMATION);
+      if (entered) {
+        MessageBoxW(
+            window_,
+            windows::Utf8ToWide(Locale::Get(
+                "Coding Mode is active. WorkBoost recorded every applied "
+                "action for deterministic rollback."))
+                .c_str(),
+            windows::Utf8ToWide(Locale::Get("Coding Mode active")).c_str(),
+            MB_OK | MB_ICONINFORMATION);
+      } else if (active_coding_command_ == CodingModeCommand::Exit) {
+        const auto unclosed =
+            ParseUnclosedProcessSelections(result->output);
+        if (!unclosed.empty()) {
+          PromptRetryClose(unclosed);
+        } else {
+          MessageBoxW(
+              window_,
+              windows::Utf8ToWide(Locale::Get(
+                  "The reversible session was restored and verified."))
+                  .c_str(),
+              windows::Utf8ToWide(Locale::Get("Recovery complete")).c_str(),
+              MB_OK | MB_ICONINFORMATION);
+        }
+      } else if (active_coding_command_ == CodingModeCommand::RetryClose) {
+        MessageBoxW(
+            window_,
+            windows::Utf8ToWide(Locale::Get(
+                "Cleanup retry completed. Revalidation, session "
+                "persistence, and reporting used the standard Coding Mode "
+                "path."))
+                .c_str(),
+            windows::Utf8ToWide(Locale::Get("Cleanup Retry")).c_str(),
+            MB_OK | MB_ICONINFORMATION);
+      } else {
+        MessageBoxW(
+            window_,
+            windows::Utf8ToWide(Locale::Get(
+                "The reversible session was restored and verified."))
+                .c_str(),
+            windows::Utf8ToWide(Locale::Get("Recovery complete")).c_str(),
+            MB_OK | MB_ICONINFORMATION);
+      }
     } else {
       std::ostringstream details;
       details << Locale::Get("WorkBoost did not complete the requested "
@@ -704,6 +744,39 @@ class DashboardWindow {
     }
     worker_condition_.notify_one();
     InvalidateRect(window_, nullptr, FALSE);
+  }
+
+  void PromptRetryClose(const std::vector<ProcessSelection>& unclosed) {
+    std::string details;
+    for (const auto& selection : unclosed) {
+      std::string name = "PID " + std::to_string(selection.pid);
+      if (latest_model_) {
+        const auto process = std::find_if(
+            latest_model_->processes.begin(),
+            latest_model_->processes.end(),
+            [&selection](const ProcessViewModel& candidate) {
+              return candidate.pid == selection.pid &&
+                     candidate.start_time_100ns ==
+                         selection.expected_start_time_100ns;
+            });
+        if (process != latest_model_->processes.end()) name = process->name;
+      }
+      details += "  " + name + " (PID " + std::to_string(selection.pid) +
+                 ")\r\n";
+    }
+    const std::string message = Locale::Format(
+        "{0} cleanup process(es) are still running after exit:\r\n{1}\r\n"
+        "Retry graceful close now? Choosing No keeps them running.",
+        {std::to_string(unclosed.size()), details});
+    const int answer = MessageBoxW(
+        window_, windows::Utf8ToWide(message).c_str(),
+        windows::Utf8ToWide(Locale::Get("Retry Cleanup")).c_str(),
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+    if (answer == IDYES) {
+      StartCodingCommand(CodingModeCommand::RetryClose, unclosed);
+    } else {
+      status_message_ = Locale::Get("Cleanup processes kept running.");
+    }
   }
 
   void PostModel(DashboardViewModel model) {

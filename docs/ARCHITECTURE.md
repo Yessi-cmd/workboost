@@ -84,7 +84,7 @@ ProtectionPolicy 的主要不变量：
   VersionControl 进程名在 `RuleFor` 边界重新施加固有类别和 Strong 下限，分层配置不能
   通过重分类绕过保护。
 
-OptimizationPlanner 只能创建强类型 Action。Coding Mode 清理池在 GUI 内保存 `PID + process start time`，子进程边界只接受最多 64 个十进制 `--close-process PID:START_TIME_100NS` 参数，不接受进程名、路径或命令文本。CLI 在基线结束后从实时快照重新解析进程名和类别；OptimizationPlanner 与 SafetyValidator 都会重新查找 PID、校验启动时间、完整 Process/TCP 清单、可见后台窗口及 ProtectionPolicy。ActionExecutor 不接受任意命令文本。
+OptimizationPlanner 只能创建强类型 Action。Coding Mode 清理池在 GUI 内保存 `PID + process start time`，子进程边界只接受最多 64 个十进制 `--close-process PID:START_TIME_100NS` 参数，不接受进程名、路径或命令文本。基线窗口的 `WindowRuntimeContext` 取所有完整采样点的保护 PID 并集（远程调试端口连接、dumpcap 抓包），foreground 取最后一个快照；完整 Process/TCP 样本少于两个或覆盖不足窗口一半时，依赖保护清单的动作全部 fail-closed。CLI 在基线结束后从实时快照重新解析进程名和类别；OptimizationPlanner 与 SafetyValidator 都会重新查找 PID、校验启动时间、完整 Process/TCP 清单、可见后台窗口及 ProtectionPolicy。ActionExecutor 不接受任意命令文本。
 
 服务动作还必须通过 `ServiceProtectionPolicy`：只有显式配置的 Updater、CloudSync 或 VendorUtility 且最终保护级别为 Optimizable 时才可成为候选。System/Network/Security/RemoteAccess/PacketCapture/Device/Unknown、VPN/EDR 关键词、承载受保护远程连接或活动抓包 PID 的服务均被拒绝。进程或 TCP 清单不完整时，Planner 与 SafetyValidator 会拒绝进程降优先级和 Graceful Close；服务动作还由 Helper 再次采用 fail-closed 校验。
 
@@ -126,10 +126,15 @@ Planned 表示“系统调用可能尚未执行，也可能已执行但结果还
 - 目标必须具有可见顶层窗口，且不能是前台进程。
 - 手动选择仍不能绕过 System/Security、Unknown Strong、Always Protect、开发工具或受保护远程连接/抓包上下文。
 - 平台层校验 PID 与启动时间后，仅通过 `SendMessageTimeout(WM_CLOSE)` 请求关闭。
-- 所有顶层窗口共享单个动作超时预算；部分窗口投递超时且进程仍存活时返回
-  Uncertain，不能因另一个窗口成功就声称 Completed。
+- 进入模式时同一批次的所有关闭目标共享 `graceful_close_batch_budget_ms`
+  截止时间并在有界工作线程中并发投递；每个目标仍保留独立窗口超时上限，
+  部分窗口投递超时且进程仍存活时返回 Uncertain，不能因另一个窗口成功就
+  声称 Completed。
 - 应用可以显示未保存内容提示；WorkBoost 不调用 `TerminateProcess`。
 - 已持久化 Completed 的请求无需回滚；崩溃窗口中的请求进入 Uncertain。
+- `coding retry-close` 只接受十进制 `PID:START_TIME_100NS`，重新采样后走与
+  进入模式相同的校验、轻量会话持久化、批量执行、验证和报告链路；身份不匹配、
+  PID 复用、无可见窗口、前台或受保护状态都会拒绝。
 
 `StopServiceTemporary`（Medium、可逆）：
 

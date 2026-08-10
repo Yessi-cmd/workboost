@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -326,6 +327,114 @@ void TestGracefulClosePlanningAndProtection() {
   Check(!SafetyValidator(config).Validate(down_plan.actions[0], snapshot,
                                           &reason),
         "validator must reject priority decrease with incomplete TCP inventory");
+}
+
+void TestWindowProtectionContext() {
+  SystemSnapshot first;
+  first.process_inventory_complete = true;
+  first.tcp_inventory_complete = true;
+  ProcessSnapshot terminal;
+  terminal.pid = 100;
+  terminal.name = "ssh.exe";
+  terminal.classification = ProcessClass::RemoteTerminal;
+  first.processes.push_back(terminal);
+  first.tcp_sessions.push_back(
+      TcpSession{100, "127.0.0.1", 51000, "10.0.0.3", 22,
+                 TcpState::Established, false});
+  ProcessSnapshot wireshark;
+  wireshark.pid = 200;
+  wireshark.name = "wireshark.exe";
+  wireshark.classification = ProcessClass::PacketCapture;
+  first.processes.push_back(wireshark);
+  ProcessSnapshot dumpcap;
+  dumpcap.pid = 201;
+  dumpcap.name = "dumpcap.exe";
+  dumpcap.classification = ProcessClass::PacketCapture;
+  first.processes.push_back(dumpcap);
+
+  SystemSnapshot quiet = first;
+  quiet.processes.clear();
+  quiet.tcp_sessions.clear();
+  SnapshotHistory history(8);
+  history.Add(first);
+  history.Add(quiet);
+  history.Add(quiet);
+  const auto window = workboost::BuildWindowRuntimeContext(
+      history, std::unordered_set<std::uint16_t>{22, 23});
+  Check(window.total_samples == 3 &&
+            window.complete_process_samples == 3 &&
+            window.complete_tcp_samples == 3,
+        "window context must count complete inventory samples");
+  Check(window.context.remote_session_pids.count(100) == 1,
+        "a remote session observed anywhere in the window must stay protected");
+  Check(window.context.active_capture_pids.count(200) == 1,
+        "capture activity observed anywhere in the window must stay protected");
+
+  SnapshotHistory partial(4);
+  partial.Add(first);
+  SystemSnapshot missing_tcp = quiet;
+  missing_tcp.tcp_inventory_complete = false;
+  partial.Add(missing_tcp);
+  partial.Add(missing_tcp);
+  const auto partial_window = workboost::BuildWindowRuntimeContext(
+      partial, std::unordered_set<std::uint16_t>{22, 23});
+  Check(partial_window.total_samples == 3 &&
+            partial_window.complete_process_samples == 3 &&
+            partial_window.complete_tcp_samples == 1,
+        "partial TCP coverage must be reported for fail-closed planning");
+}
+
+void TestWindowedPlannerProtection() {
+  Config config = Config::Defaults();
+  config.process_rules["exampleupdater.exe"] =
+      {ProcessClass::Updater, ProtectionLevel::Optimizable};
+  config.coding_profile.allow_graceful_close.insert("exampleupdater.exe");
+  ProcessSnapshot updater;
+  updater.pid = 21;
+  updater.name = "ExampleUpdater.exe";
+  updater.start_time_100ns = 789;
+  updater.classification = ProcessClass::Updater;
+  updater.protection_level = ProtectionLevel::Optimizable;
+  updater.has_visible_window = true;
+  SystemSnapshot early;
+  early.processes.push_back(updater);
+  early.process_inventory_complete = true;
+  early.tcp_inventory_complete = true;
+  early.tcp_sessions.push_back(
+      TcpSession{21, "127.0.0.1", 50002, "10.0.0.3", 22,
+                 TcpState::Established, false});
+  SystemSnapshot late = early;
+  late.tcp_sessions.clear();
+
+  SnapshotHistory protected_window(4);
+  protected_window.Add(early);
+  protected_window.Add(late);
+  protected_window.Add(late);
+  const workboost::ProcessSelection selection{21, 789};
+  const auto protected_plan =
+      OptimizationPlanner(config).Create(protected_window, {selection});
+  Check(protected_plan.actions.empty(),
+        "a remote session from any baseline sample must protect the target");
+
+  SnapshotHistory quiet_window(4);
+  quiet_window.Add(late);
+  quiet_window.Add(late);
+  quiet_window.Add(late);
+  const auto quiet_plan =
+      OptimizationPlanner(config).Create(quiet_window, {selection});
+  Check(quiet_plan.actions.size() == 1,
+        "a clean window must still allow an explicitly selected process");
+
+  SnapshotHistory weak_window(4);
+  weak_window.Add(early);
+  SystemSnapshot missing_tcp = late;
+  missing_tcp.tcp_inventory_complete = false;
+  weak_window.Add(missing_tcp);
+  weak_window.Add(missing_tcp);
+  const auto weak_plan =
+      OptimizationPlanner(config).Create(weak_window, {selection});
+  Check(weak_plan.actions.empty(),
+        "less than half the window with complete TCP inventory must fail closed");
 }
 
 void TestServiceProtectionPolicy() {
@@ -1147,6 +1256,52 @@ void TestDashboardPresenter() {
         "dashboard must mask remote IP addresses by default");
 }
 
+void TestGracefulCloseBatchExecutor() {
+  Config config = Config::Defaults();
+  ProcessSnapshot protected_process;
+  protected_process.pid = 11;
+  protected_process.name = "ssh.exe";
+  protected_process.start_time_100ns = 111;
+  protected_process.classification = ProcessClass::RemoteTerminal;
+  protected_process.protection_level = ProtectionLevel::Strong;
+  protected_process.has_visible_window = true;
+  SystemSnapshot snapshot;
+  snapshot.processes.push_back(protected_process);
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  OptimizationAction protected_action;
+  protected_action.id = "batch-protected";
+  protected_action.type = ActionType::GracefulCloseProcess;
+  protected_action.risk = ActionRisk::Low;
+  protected_action.pid = 11;
+  protected_action.expected_start_time_100ns = 111;
+  protected_action.process_name = "ssh.exe";
+  protected_action.timeout_ms = 100;
+
+  OptimizationAction missing_action = protected_action;
+  missing_action.id = "batch-missing";
+  missing_action.pid = 12;
+  missing_action.expected_start_time_100ns = 112;
+  missing_action.process_name = "missing.exe";
+
+  OptimizationAction wrong_type = protected_action;
+  wrong_type.id = "batch-wrong-type";
+  wrong_type.type = ActionType::SetPriorityClass;
+
+  const auto results = ActionExecutor(config).ExecuteGracefulCloseBatch(
+      {protected_action, missing_action, wrong_type}, snapshot, 500);
+  Check(results.size() == 3,
+        "batch executor must return one result per input action");
+  Check(results[0].state == ActionState::Rejected &&
+            results[1].state == ActionState::Rejected &&
+            results[2].state == ActionState::Rejected,
+        "batch executor must reject protected, missing, and non-close targets");
+  const auto empty = ActionExecutor(config).ExecuteGracefulCloseBatch(
+      {}, snapshot, 500);
+  Check(empty.empty(), "an empty batch must not call the Windows API");
+}
+
 void TestDashboardCleanupEligibility() {
   Config config = Config::Defaults();
   SystemSnapshot snapshot;
@@ -1554,6 +1709,84 @@ void TestCodingModeCommandValidation() {
   Check(!selection_on_exit.launched &&
             selection_on_exit.error.code == ERROR_INVALID_PARAMETER,
         "cleanup selections must only be accepted by Coding Mode enter");
+
+  const auto retry_empty =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::RetryClose, 10, {});
+  Check(!retry_empty.launched &&
+            retry_empty.error.code == ERROR_INVALID_PARAMETER,
+        "retry-close requires at least one cleanup selection");
+  const auto retry_invalid =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::RetryClose, 10,
+          {workboost::ProcessSelection{0, 1}});
+  Check(!retry_invalid.launched &&
+            retry_invalid.error.code == ERROR_INVALID_PARAMETER,
+        "retry-close must reject an invalid cleanup identity");
+  const auto selection_on_restore =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::Restore, 10,
+          {workboost::ProcessSelection{1, 1}});
+  Check(!selection_on_restore.launched &&
+            selection_on_restore.error.code == ERROR_INVALID_PARAMETER,
+        "cleanup selections must not be accepted by recovery restore");
+}
+
+void TestUnclosedProcessCollection() {
+  workboost::OptimizationSession session;
+  workboost::ExecutedAction running;
+  running.action.type = ActionType::GracefulCloseProcess;
+  running.action.pid = 301;
+  running.action.expected_start_time_100ns = 9001;
+  running.action.process_name = "ExampleUpdater.exe";
+  running.state = ActionState::Completed;
+  session.actions.push_back(running);
+
+  workboost::ExecutedAction exited = running;
+  exited.action.pid = 302;
+  exited.action.expected_start_time_100ns = 9002;
+  session.actions.push_back(exited);
+
+  workboost::ExecutedAction reused = running;
+  reused.action.pid = 303;
+  reused.action.expected_start_time_100ns = 8888;
+  session.actions.push_back(reused);
+
+  SystemSnapshot snapshot;
+  ProcessSnapshot still_running;
+  still_running.pid = 301;
+  still_running.start_time_100ns = 9001;
+  still_running.name = "ExampleUpdater.exe";
+  snapshot.processes.push_back(still_running);
+  ProcessSnapshot new_instance;
+  new_instance.pid = 303;
+  new_instance.start_time_100ns = 9999;
+  new_instance.name = "ExampleUpdater.exe";
+  snapshot.processes.push_back(new_instance);
+
+  const auto unclosed =
+      workboost::SessionManager::CollectUnclosedProcesses(session, snapshot);
+  Check(unclosed.size() == 1 && unclosed[0].pid == 301 &&
+            unclosed[0].start_time_100ns == 9001 &&
+            unclosed[0].name == "ExampleUpdater.exe",
+        "only the exact PID+start-time target that is still running counts");
+}
+
+void TestParseUnclosedProcessSelections() {
+  const std::string output =
+      "Coding Mode exited.\n"
+      "UNCLOSED_PROCESS pid=301 start=9001 name=ExampleUpdater.exe\n"
+      "UNCLOSED_PROCESS pid=302 start=9002 name=second app.exe\r\n"
+      "UNCLOSED_PROCESS pid=301 start=9001 name=duplicate\n"
+      "junk line\n"
+      "UNCLOSED_PROCESS pid=bad start=1 name=broken\n";
+  const auto selections =
+      workboost::gui::ParseUnclosedProcessSelections(output);
+  Check(selections.size() == 2 && selections[0].pid == 301 &&
+            selections[0].expected_start_time_100ns == 9001 &&
+            selections[1].pid == 302 &&
+            selections[1].expected_start_time_100ns == 9002,
+        "GUI must parse stable unclosed-process lines and deduplicate them");
 }
 
 void TestCompletionReport() {
@@ -2187,6 +2420,9 @@ void TestLocale() {
   Check(Locale::Get("Cleanup Pool") == "清理池" &&
             Locale::Get("Protected by policy") == "受策略保护",
         "Chinese locale must translate cleanup selection states");
+  Check(Locale::Get("Cleanup retry completed.") == "清理重试已完成。" &&
+            Locale::Get("Retry Cleanup") == "重试清理",
+        "Chinese locale must translate retry-close prompts");
   Check(!Locale::Get("Settings").empty(),
         "Chinese settings label must be non-empty");
   Check(Locale::Format("{0} planned changes", {"5"}) == "5 项计划变更",
@@ -2223,6 +2459,34 @@ void TestConfigLanguage() {
   const workboost::Config defaults = workboost::Config::Defaults();
   Check(defaults.language == "en" || defaults.language == "zh",
         "default language must be a known value");
+  Check(defaults.coding_profile.graceful_close_batch_budget_ms == 5000,
+        "graceful-close shared budget must default to 5000 ms");
+
+  const std::filesystem::path budget_directory =
+      std::filesystem::temp_directory_path() /
+      ("workboost-budget-test-" + std::to_string(GetCurrentProcessId()) + "-" +
+       std::to_string(GetTickCount64()));
+  std::error_code budget_error;
+  std::filesystem::create_directories(budget_directory, budget_error);
+  Check(!budget_error, "temporary budget directory should be created");
+  struct BudgetCleanup {
+    std::filesystem::path path;
+    ~BudgetCleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } budget_cleanup{budget_directory};
+  Check(workboost::windows::AtomicWriteUtf8(
+            budget_directory / "profiles.json",
+            "{\n  \"profiles\": {\n    \"coding\": {\n"
+            "      \"graceful_close_batch_budget_ms\": 8000\n    }\n  }\n}\n",
+            &error),
+        "budget profiles.json fixture should be written: " + error);
+  workboost::Config loaded = workboost::Config::Defaults();
+  std::string load_warning;
+  Check(loaded.LoadDirectory(budget_directory, &load_warning) &&
+            loaded.coding_profile.graceful_close_batch_budget_ms == 8000,
+        "shared graceful-close budget must load from profiles.json");
 }
 
 void TestHardwareInfo() {
@@ -2259,6 +2523,8 @@ int main() {
       {"safety validator", TestSafetyValidator},
       {"graceful close planning and protection",
        TestGracefulClosePlanningAndProtection},
+      {"window protection context", TestWindowProtectionContext},
+      {"windowed planner protection", TestWindowedPlannerProtection},
       {"explicit cleanup pool planning", TestExplicitCleanupPoolPlanning},
       {"service protection policy", TestServiceProtectionPolicy},
       {"service action planning and validation",
@@ -2274,6 +2540,7 @@ int main() {
        TestCurrentProcessVerificationHelpers},
       {"graceful close recovery state", TestGracefulCloseRecoveryState},
       {"real graceful close request", TestRealGracefulCloseRequest},
+      {"graceful close batch executor", TestGracefulCloseBatchExecutor},
       {"read-only service query", TestReadOnlyServiceQuery},
       {"read-only serial port query", TestReadOnlySerialPortQuery},
       {"read-only startup query", TestReadOnlyStartupQuery},
@@ -2291,6 +2558,9 @@ int main() {
       {"dashboard language toggle target",
        TestDashboardLanguageToggleTarget},
       {"Coding Mode command validation", TestCodingModeCommandValidation},
+      {"unclosed process collection", TestUnclosedProcessCollection},
+      {"unclosed process selections parsing",
+       TestParseUnclosedProcessSelections},
       {"completion report", TestCompletionReport},
       {"diagnosis rules", TestDiagnosisRules},
       {"benchmark window aggregation", TestBenchmarkWindowAggregation},

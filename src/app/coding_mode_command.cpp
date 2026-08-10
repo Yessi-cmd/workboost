@@ -35,6 +35,15 @@ std::wstring FixedArguments(
       }
       return arguments;
     }
+    case CodingModeCommand::RetryClose: {
+      std::wstring arguments = L" coding retry-close";
+      for (const auto& process : cleanup_processes) {
+        arguments += L" --close-process " + std::to_wstring(process.pid) +
+                     L":" +
+                     std::to_wstring(process.expected_start_time_100ns);
+      }
+      return arguments;
+    }
     case CodingModeCommand::Exit: return L" coding exit";
     case CodingModeCommand::Restore: return L" recovery restore";
   }
@@ -50,7 +59,14 @@ CodingModeCommandResult CodingModeCommandClient::Execute(
       (baseline_seconds < 10 || baseline_seconds > 600)) {
     return Failure("Validate Coding Mode baseline", ERROR_INVALID_PARAMETER);
   }
-  if ((command != CodingModeCommand::Enter && !cleanup_processes.empty()) ||
+  if (command == CodingModeCommand::RetryClose &&
+      cleanup_processes.empty()) {
+    return Failure("Validate Coding Mode retry pool",
+                   ERROR_INVALID_PARAMETER);
+  }
+  if ((command != CodingModeCommand::Enter &&
+       command != CodingModeCommand::RetryClose &&
+       !cleanup_processes.empty()) ||
       cleanup_processes.size() > kMaximumCleanupProcesses ||
       std::any_of(cleanup_processes.begin(), cleanup_processes.end(),
                   [](const ProcessSelection& process) {

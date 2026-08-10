@@ -259,4 +259,46 @@ RuntimeContext BuildRuntimeContext(const SystemSnapshot& snapshot) {
   return BuildRuntimeContext(snapshot, kDefaultRemotePorts);
 }
 
+WindowRuntimeContext BuildWindowRuntimeContext(
+    const SnapshotHistory& history,
+    const std::unordered_set<std::uint16_t>& protected_remote_ports) {
+  WindowRuntimeContext window;
+  for (const auto& snapshot : history.Snapshots()) {
+    ++window.total_samples;
+    if (snapshot.process_inventory_complete) {
+      ++window.complete_process_samples;
+      bool capture_active = false;
+      for (const auto& process : snapshot.processes) {
+        if (process.is_foreground) {
+          window.context.foreground_pid = process.pid;
+        }
+        std::string lower_name = process.name;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
+                       [](unsigned char ch) {
+                         return static_cast<char>(std::tolower(ch));
+                       });
+        if (lower_name == "dumpcap.exe") capture_active = true;
+      }
+      if (capture_active) {
+        for (const auto& process : snapshot.processes) {
+          if (process.classification == ProcessClass::PacketCapture) {
+            window.context.active_capture_pids.insert(process.pid);
+          }
+        }
+      }
+    }
+    if (snapshot.tcp_inventory_complete) {
+      ++window.complete_tcp_samples;
+      for (const auto& session : snapshot.tcp_sessions) {
+        if (session.state == TcpState::Established &&
+            (session.remote_port == 22 || session.remote_port == 23 ||
+             protected_remote_ports.count(session.remote_port) != 0)) {
+          window.context.remote_session_pids.insert(session.pid);
+        }
+      }
+    }
+  }
+  return window;
+}
+
 }  // namespace workboost

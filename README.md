@@ -107,6 +107,7 @@ workboost coding enter --dry-run
 workboost coding enter
 workboost coding enter --confirm-service-actions
 workboost coding exit
+workboost coding retry-close --close-process PID:START_TIME_100NS ...
 workboost recovery status
 workboost recovery restore
 workboost recovery acknowledge
@@ -114,7 +115,7 @@ workboost recovery acknowledge
 
 不带参数运行 `workboost` 会打开 Dashboard；`workboost gui` 与其等价。Dashboard 的 Refresh 只请求新的只读采样，Export all 会把七个页面的当前脱敏视图写入用户选择的本地文本文件。点击标题栏关闭按钮或最小化会把窗口隐藏到系统托盘；左键单击托盘图标恢复面板，右键打开包含“打开”和“退出”的菜单，只有其中的“退出”才会结束进程。若托盘图标注册失败，窗口会保持可见。
 
-Coding Mode 页面把可选进程排在前面，并显示 CPU、Working Set 与磁盘 I/O。左键单击进程可加入清理池，再次单击可移出；点击“进入 Coding Mode”后，GUI 只把 PID 与进程启动时间作为固定数字参数传给同一可执行文件。CLI 会在 10 秒基线后重新采样，核对 PID/启动时间、可见窗口、前台状态及完整 Process/TCP 保护清单，再由 `ProtectionPolicy -> OptimizationPlanner -> SafetyValidator -> ActionExecutor` 执行。进程重启、变成前台或获得受保护连接都会使动作被拒绝。
+Coding Mode 页面把可选进程排在前面，并显示 CPU、Working Set 与磁盘 I/O。左键单击进程可加入清理池，再次单击可移出；点击“进入 Coding Mode”后，GUI 只把 PID 与进程启动时间作为固定数字参数传给同一可执行文件。基线保护状态按整个窗口聚合：窗口内任意一个采样点出现的 SSH/Telnet/自定义远程调试连接或 dumpcap 抓包都会让对应 PID 在整个计划中保持受保护，即使它在最后一个采样点已消失。计划使用最后一个完整快照的进程状态，但保护判定使用窗口并集；完整 Process/TCP 样本少于窗口一半或不足两个时，关闭、降优先级和临时停服务动作全部 fail-closed。执行前重新采样并核对 PID/启动时间、可见窗口、前台状态及完整保护清单，再由 `ProtectionPolicy -> OptimizationPlanner -> SafetyValidator -> ActionExecutor` 执行。进程重启、变成前台或获得受保护连接都会使动作被拒绝。
 
 Dashboard 的 Top Impact 按可执行文件名聚合并同时列出 CPU、Private Memory 和 Disk I/O，最终等级取三项中的最高等级。CPU 的 Medium/High 边界为 5%/20%，Private Memory 为 512 MiB/2 GiB；I/O 的 Medium/High 边界分别是 `background_io_bytes_per_sec` 的 0.5 倍和 2 倍，默认即 5 MiB/s 与 20 MiB/s。
 
@@ -133,7 +134,7 @@ Dashboard 的 Top Impact 按可执行文件名聚合并同时列出 CPU、Privat
 
 进入 Coding Mode 前采集 10–600 秒基线，默认 10 秒。正常退出时会在回滚前采集最多 5 秒 Optimized 证据，再逆序恢复动作并生成 report schema v1 报告。Baseline/Optimized 系统数值聚合整个采样窗口，并记录 `sample_count`、`observed_span_ms` 及 Process/TCP/保护完整样本数，不是只取最后一个快照；Development 与后台 Top I/O 只使用对应完整样本。建议先使用 `--dry-run` 检查计划。执行器只接受三类白名单动作：`SetPriorityClass`（Safe，可逆，目标仅允许 `below_normal`、`normal` 或 `above_normal`）、`GracefulCloseProcess`（Low，必须来自 `allow_graceful_close` 或用户明确选择的清理池）和 `StopServiceTemporary`（Medium、可逆，必须由 `allow_service_stop` 与 `--confirm-service-actions` 同时允许）。任何动作都必须再次通过 SafetyValidator 和对应 ProtectionPolicy。
 
-Graceful Close 只向目标进程的可见顶层窗口发送 `WM_CLOSE`。应用可以显示“保存更改”提示并继续运行；WorkBoost 不会强制结束进程。多个窗口共享一个总超时预算；若只有部分窗口确认收到请求且进程仍在运行，结果为 `Uncertain`，不会误报 Completed。仓库默认关闭允许列表为空，因此默认配置不会自动关闭任何应用；只有用户主动加入清理池才会创建手动关闭动作。Your Phone/Phone Link、Widgets、Game Bar、Windows Settings、Calculator、Notepad、Paint、Snipping Tool 和 Photos 等非核心 Windows 附加应用具有明确的 Optimizable 分类，但仍要求可见后台窗口与用户选择。Explorer、Shell/Search Host、System/Security 和所有未知进程仍保持不可选。进程或 TCP 保护清单不完整时，降优先级和 Graceful Close 都会被 Planner 与 SafetyValidator 双重拒绝。
+Graceful Close 只向目标进程的可见顶层窗口发送 `WM_CLOSE`。应用可以显示“保存更改”提示并继续运行；WorkBoost 不会强制结束进程。进入 Coding Mode 时，同一批清理池进程共享一个可配置的总超时预算（`graceful_close_batch_budget_ms`，默认 5000 ms，范围 1000–30000），在同一份保护快照校验后并发投递，而不是逐个等待；每个目标的独立 `timeout_ms` 仍是该目标窗口的上限。若只有部分窗口确认收到请求且进程仍在运行，结果为 `Uncertain`，不会误报 Completed。退出 Coding Mode 后，WorkBoost 会再次核对精确 PID/启动时间，列出仍运行的清理进程并给出可直接复制的 `workboost coding retry-close --close-process PID:START_TIME_100NS ...` 命令；GUI 会弹窗询问是否立即重试。重试使用与进入模式相同的身份、可见窗口、前台、完整清单和 ProtectionPolicy 校验，并走同一条会话持久化/报告链路；PID 复用或进程重启会被拒绝。仓库默认关闭允许列表为空，因此默认配置不会自动关闭任何应用；只有用户主动加入清理池才会创建手动关闭动作。Your Phone/Phone Link、Widgets、Game Bar、Windows Settings、Calculator、Notepad、Paint、Snipping Tool 和 Photos 等非核心 Windows 附加应用具有明确的 Optimizable 分类，但仍要求可见后台窗口与用户选择。Explorer、Shell/Search Host、System/Security 和所有未知进程仍保持不可选。进程或 TCP 保护清单不完整时，降优先级和 Graceful Close 都会被 Planner 与 SafetyValidator 双重拒绝。
 
 ## 配置
 

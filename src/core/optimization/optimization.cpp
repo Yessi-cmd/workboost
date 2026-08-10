@@ -45,14 +45,46 @@ int PriorityRank(std::uint32_t priority) {
   }
 }
 
+bool WindowCoverageOk(const WindowRuntimeContext& window,
+                      const SystemSnapshot& latest) {
+  if (window.total_samples <= 1) {
+    return latest.process_inventory_complete &&
+           latest.tcp_inventory_complete;
+  }
+  return latest.process_inventory_complete &&
+         latest.tcp_inventory_complete &&
+         window.complete_process_samples >= 2 &&
+         window.complete_tcp_samples >= 2 &&
+         window.complete_process_samples * 2 >= window.total_samples &&
+         window.complete_tcp_samples * 2 >= window.total_samples;
+}
+
 }  // namespace
 
 OptimizationPlan OptimizationPlanner::Create(
     const SystemSnapshot& snapshot,
     const std::vector<ProcessSelection>& explicit_close) const {
+  return CreateFrom(
+      snapshot, BuildRuntimeContext(snapshot, config_.remote_debug_ports),
+      true, explicit_close);
+}
+
+OptimizationPlan OptimizationPlanner::Create(
+    const SnapshotHistory& history,
+    const std::vector<ProcessSelection>& explicit_close) const {
+  const SystemSnapshot* latest = history.Latest();
+  if (latest == nullptr) return {};
+  const WindowRuntimeContext window =
+      BuildWindowRuntimeContext(history, config_.remote_debug_ports);
+  return CreateFrom(*latest, window.context,
+                    WindowCoverageOk(window, *latest), explicit_close);
+}
+
+OptimizationPlan OptimizationPlanner::CreateFrom(
+    const SystemSnapshot& snapshot, const RuntimeContext& context,
+    bool window_coverage_ok,
+    const std::vector<ProcessSelection>& explicit_close) const {
   OptimizationPlan plan;
-  const RuntimeContext context =
-      BuildRuntimeContext(snapshot, config_.remote_debug_ports);
   ProtectionPolicy policy(config_);
   for (const auto& process : snapshot.processes) {
     const std::string name = ToLowerAscii(process.name);
@@ -92,7 +124,7 @@ OptimizationPlan OptimizationPlanner::Create(
 
     if (config_.coding_profile.allow_graceful_close.count(name) != 0) {
       if (!snapshot.process_inventory_complete ||
-          !snapshot.tcp_inventory_complete) {
+          !snapshot.tcp_inventory_complete || !window_coverage_ok) {
         plan.rejected.push_back(
             process.name + ": protection inventory is incomplete");
       } else if (process.start_time_100ns == 0) {
@@ -127,7 +159,7 @@ OptimizationPlan OptimizationPlanner::Create(
     if (config_.coding_profile.allow_priority_down.count(name) != 0 &&
         process.priority_class != BELOW_NORMAL_PRIORITY_CLASS) {
       if (!snapshot.process_inventory_complete ||
-          !snapshot.tcp_inventory_complete) {
+          !snapshot.tcp_inventory_complete || !window_coverage_ok) {
         plan.rejected.push_back(
             process.name + ": protection inventory is incomplete");
         continue;
@@ -183,7 +215,7 @@ OptimizationPlan OptimizationPlanner::Create(
       continue;
     }
     if (!snapshot.process_inventory_complete ||
-        !snapshot.tcp_inventory_complete) {
+        !snapshot.tcp_inventory_complete || !window_coverage_ok) {
       plan.rejected.push_back(process->name +
                               ": protection inventory is incomplete");
       continue;
@@ -220,6 +252,13 @@ OptimizationPlan OptimizationPlanner::Create(
   for (const auto& service : snapshot.services) {
     const std::string name = ToLowerAscii(service.name);
     if (config_.coding_profile.allow_service_stop.count(name) == 0) continue;
+    if (!snapshot.process_inventory_complete ||
+        !snapshot.tcp_inventory_complete ||
+        !snapshot.service_inventory_complete || !window_coverage_ok) {
+      plan.rejected.push_back(
+          service.name + ": service protection inventory is incomplete");
+      continue;
+    }
     OptimizationAction action;
     action.id = "service-stop-" + name;
     action.type = ActionType::StopServiceTemporary;
@@ -446,6 +485,75 @@ ExecutedAction ActionExecutor::Execute(
   result.error_code = ERROR_NOT_SUPPORTED;
   result.error_message = "action type is not implemented";
   return result;
+}
+
+std::vector<ExecutedAction> ActionExecutor::ExecuteGracefulCloseBatch(
+    const std::vector<OptimizationAction>& actions,
+    const SystemSnapshot& current_snapshot,
+    std::uint32_t shared_timeout_ms) const {
+  std::vector<ExecutedAction> results;
+  results.reserve(actions.size());
+  std::vector<windows::GracefulCloseRequest> requests;
+  requests.reserve(actions.size());
+  std::vector<std::size_t> request_to_result;
+  request_to_result.reserve(actions.size());
+  for (const auto& action : actions) {
+    ExecutedAction result;
+    result.action = action;
+    std::string rejection_reason;
+    if (action.type != ActionType::GracefulCloseProcess ||
+        !SafetyValidator(config_).Validate(action, current_snapshot,
+                                           &rejection_reason)) {
+      result.state = ActionState::Rejected;
+      result.error_code = ERROR_ACCESS_DISABLED_BY_POLICY;
+      result.error_message =
+          rejection_reason.empty()
+              ? "batch target is not a graceful close action"
+              : rejection_reason;
+      results.push_back(std::move(result));
+      continue;
+    }
+    request_to_result.push_back(results.size());
+    results.push_back(std::move(result));
+    requests.push_back(
+        windows::GracefulCloseRequest{action.pid,
+                                      action.expected_start_time_100ns});
+  }
+  if (requests.empty()) return results;
+
+  const auto batch = windows::ProcessActionApi::RequestGracefulCloseBatch(
+      requests, shared_timeout_ms);
+  if (batch.error.code != 0 || batch.results.size() != requests.size()) {
+    for (const std::size_t result_index : request_to_result) {
+      auto& result = results[result_index];
+      result.state = ActionState::Failed;
+      result.error_code = batch.error.code;
+      result.error_message = batch.error.Describe();
+    }
+    return results;
+  }
+  for (std::size_t index = 0; index < requests.size(); ++index) {
+    const auto& closed = batch.results[index];
+    auto& result = results[request_to_result[index]];
+    if (!closed.success) {
+      result.state = closed.delivery_uncertain ? ActionState::Uncertain
+                                               : ActionState::Failed;
+      result.error_code = closed.error.code;
+      result.error_message = closed.error.Describe();
+      if (closed.delivery_uncertain) {
+        result.error_message +=
+            "; WM_CLOSE delivery could not be determined and will not be "
+            "replayed automatically";
+      }
+      continue;
+    }
+    result.state = ActionState::Completed;
+    result.result_message =
+        closed.process_exited
+            ? "graceful close completed and process exited"
+            : "WM_CLOSE delivered; process may be awaiting user confirmation";
+  }
+  return results;
 }
 
 bool ActionExecutor::Rollback(ExecutedAction* action) const {
