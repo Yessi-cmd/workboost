@@ -10,6 +10,7 @@
 #include "core/optimization/optimization.h"
 #include "core/policy/protection_policy.h"
 #include "core/policy/service_protection_policy.h"
+#include "gui/dashboard.h"
 #include "gui/dashboard_model.h"
 #include "gui/dashboard_renderer.h"
 #include "platform/windows/service_api.h"
@@ -23,6 +24,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -33,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -324,6 +327,114 @@ void TestGracefulClosePlanningAndProtection() {
   Check(!SafetyValidator(config).Validate(down_plan.actions[0], snapshot,
                                           &reason),
         "validator must reject priority decrease with incomplete TCP inventory");
+}
+
+void TestWindowProtectionContext() {
+  SystemSnapshot first;
+  first.process_inventory_complete = true;
+  first.tcp_inventory_complete = true;
+  ProcessSnapshot terminal;
+  terminal.pid = 100;
+  terminal.name = "ssh.exe";
+  terminal.classification = ProcessClass::RemoteTerminal;
+  first.processes.push_back(terminal);
+  first.tcp_sessions.push_back(
+      TcpSession{100, "127.0.0.1", 51000, "10.0.0.3", 22,
+                 TcpState::Established, false});
+  ProcessSnapshot wireshark;
+  wireshark.pid = 200;
+  wireshark.name = "wireshark.exe";
+  wireshark.classification = ProcessClass::PacketCapture;
+  first.processes.push_back(wireshark);
+  ProcessSnapshot dumpcap;
+  dumpcap.pid = 201;
+  dumpcap.name = "dumpcap.exe";
+  dumpcap.classification = ProcessClass::PacketCapture;
+  first.processes.push_back(dumpcap);
+
+  SystemSnapshot quiet = first;
+  quiet.processes.clear();
+  quiet.tcp_sessions.clear();
+  SnapshotHistory history(8);
+  history.Add(first);
+  history.Add(quiet);
+  history.Add(quiet);
+  const auto window = workboost::BuildWindowRuntimeContext(
+      history, std::unordered_set<std::uint16_t>{22, 23});
+  Check(window.total_samples == 3 &&
+            window.complete_process_samples == 3 &&
+            window.complete_tcp_samples == 3,
+        "window context must count complete inventory samples");
+  Check(window.context.remote_session_pids.count(100) == 1,
+        "a remote session observed anywhere in the window must stay protected");
+  Check(window.context.active_capture_pids.count(200) == 1,
+        "capture activity observed anywhere in the window must stay protected");
+
+  SnapshotHistory partial(4);
+  partial.Add(first);
+  SystemSnapshot missing_tcp = quiet;
+  missing_tcp.tcp_inventory_complete = false;
+  partial.Add(missing_tcp);
+  partial.Add(missing_tcp);
+  const auto partial_window = workboost::BuildWindowRuntimeContext(
+      partial, std::unordered_set<std::uint16_t>{22, 23});
+  Check(partial_window.total_samples == 3 &&
+            partial_window.complete_process_samples == 3 &&
+            partial_window.complete_tcp_samples == 1,
+        "partial TCP coverage must be reported for fail-closed planning");
+}
+
+void TestWindowedPlannerProtection() {
+  Config config = Config::Defaults();
+  config.process_rules["exampleupdater.exe"] =
+      {ProcessClass::Updater, ProtectionLevel::Optimizable};
+  config.coding_profile.allow_graceful_close.insert("exampleupdater.exe");
+  ProcessSnapshot updater;
+  updater.pid = 21;
+  updater.name = "ExampleUpdater.exe";
+  updater.start_time_100ns = 789;
+  updater.classification = ProcessClass::Updater;
+  updater.protection_level = ProtectionLevel::Optimizable;
+  updater.has_visible_window = true;
+  SystemSnapshot early;
+  early.processes.push_back(updater);
+  early.process_inventory_complete = true;
+  early.tcp_inventory_complete = true;
+  early.tcp_sessions.push_back(
+      TcpSession{21, "127.0.0.1", 50002, "10.0.0.3", 22,
+                 TcpState::Established, false});
+  SystemSnapshot late = early;
+  late.tcp_sessions.clear();
+
+  SnapshotHistory protected_window(4);
+  protected_window.Add(early);
+  protected_window.Add(late);
+  protected_window.Add(late);
+  const workboost::ProcessSelection selection{21, 789};
+  const auto protected_plan =
+      OptimizationPlanner(config).Create(protected_window, {selection});
+  Check(protected_plan.actions.empty(),
+        "a remote session from any baseline sample must protect the target");
+
+  SnapshotHistory quiet_window(4);
+  quiet_window.Add(late);
+  quiet_window.Add(late);
+  quiet_window.Add(late);
+  const auto quiet_plan =
+      OptimizationPlanner(config).Create(quiet_window, {selection});
+  Check(quiet_plan.actions.size() == 1,
+        "a clean window must still allow an explicitly selected process");
+
+  SnapshotHistory weak_window(4);
+  weak_window.Add(early);
+  SystemSnapshot missing_tcp = late;
+  missing_tcp.tcp_inventory_complete = false;
+  weak_window.Add(missing_tcp);
+  weak_window.Add(missing_tcp);
+  const auto weak_plan =
+      OptimizationPlanner(config).Create(weak_window, {selection});
+  Check(weak_plan.actions.empty(),
+        "less than half the window with complete TCP inventory must fail closed");
 }
 
 void TestServiceProtectionPolicy() {
@@ -1111,6 +1222,15 @@ void TestDashboardPresenter() {
   snapshot.tcp_sessions.push_back(workboost::TcpSession{
       42, "0.0.0.0", 51000, "192.168.12.34", 22,
       workboost::TcpState::Established, false});
+  snapshot.disks.push_back(workboost::DiskSnapshot{
+      "0 C: D:", "C: D:", workboost::DiskMedia::SSD, 0.25, 0.004, 0.0,
+      0.0, 0.0, 0.0, 0.0, 0, 0, false});
+  snapshot.disks.push_back(workboost::DiskSnapshot{
+      "1 E:", "E:", workboost::DiskMedia::HDD, 0.5, 0.012, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0, 0, false});
+  snapshot.disks.push_back(workboost::DiskSnapshot{
+      "0 F:", "F:", workboost::DiskMedia::HDD, 0.1, 0.008, 0.0, 0.0,
+      0.0, 0.0, 0.0, 0, 0, false});
   SnapshotHistory history(4);
   history.Add(snapshot);
   const auto model = workboost::gui::DashboardPresenter::Build(
@@ -1120,6 +1240,9 @@ void TestDashboardPresenter() {
   Check(model.system.memory_used_bytes == 12ULL * 1024 * 1024 * 1024 &&
             model.system.memory_total_bytes == 16ULL * 1024 * 1024 * 1024 &&
             model.processes.size() == 1 &&
+            model.disks.size() == 4 && model.disks[0].name == "C:" &&
+            model.disks[1].name == "D:" && model.disks[2].name == "E:" &&
+            model.disks[3].name == "F:" &&
             model.protected_workloads.size() == 1 &&
             model.protected_workloads[0].reason ==
                 "Active protected remote session" &&
@@ -1131,6 +1254,335 @@ void TestDashboardPresenter() {
   Check(protected_page.find("192.168.12.34") == std::string::npos &&
             protected_page.find("192.168.12.x") != std::string::npos,
         "dashboard must mask remote IP addresses by default");
+}
+
+void TestGracefulCloseBatchExecutor() {
+  Config config = Config::Defaults();
+  ProcessSnapshot protected_process;
+  protected_process.pid = 11;
+  protected_process.name = "ssh.exe";
+  protected_process.start_time_100ns = 111;
+  protected_process.classification = ProcessClass::RemoteTerminal;
+  protected_process.protection_level = ProtectionLevel::Strong;
+  protected_process.has_visible_window = true;
+  SystemSnapshot snapshot;
+  snapshot.processes.push_back(protected_process);
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  OptimizationAction protected_action;
+  protected_action.id = "batch-protected";
+  protected_action.type = ActionType::GracefulCloseProcess;
+  protected_action.risk = ActionRisk::Low;
+  protected_action.pid = 11;
+  protected_action.expected_start_time_100ns = 111;
+  protected_action.process_name = "ssh.exe";
+  protected_action.timeout_ms = 100;
+
+  OptimizationAction missing_action = protected_action;
+  missing_action.id = "batch-missing";
+  missing_action.pid = 12;
+  missing_action.expected_start_time_100ns = 112;
+  missing_action.process_name = "missing.exe";
+
+  OptimizationAction wrong_type = protected_action;
+  wrong_type.id = "batch-wrong-type";
+  wrong_type.type = ActionType::SetPriorityClass;
+
+  const auto results = ActionExecutor(config).ExecuteGracefulCloseBatch(
+      {protected_action, missing_action, wrong_type}, snapshot, 500);
+  Check(results.size() == 3,
+        "batch executor must return one result per input action");
+  Check(results[0].state == ActionState::Rejected &&
+            results[1].state == ActionState::Rejected &&
+            results[2].state == ActionState::Rejected,
+        "batch executor must reject protected, missing, and non-close targets");
+  const auto empty = ActionExecutor(config).ExecuteGracefulCloseBatch(
+      {}, snapshot, 500);
+  Check(empty.empty(), "an empty batch must not call the Windows API");
+}
+
+void TestDashboardCleanupEligibility() {
+  Config config = Config::Defaults();
+  SystemSnapshot snapshot;
+  snapshot.timestamp = std::chrono::system_clock::now();
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  ProcessSnapshot companion;
+  companion.pid = 301;
+  companion.name = "PhoneExperienceHost.exe";
+  companion.start_time_100ns = 3001;
+  companion.has_visible_window = true;
+  const auto rule = config.RuleFor(companion.name);
+  companion.classification = rule.process_class;
+  companion.protection_level = rule.protection;
+  snapshot.processes.push_back(companion);
+
+  ProcessSnapshot unknown = companion;
+  unknown.pid = 302;
+  unknown.name = "UnknownNativeHost.exe";
+  unknown.start_time_100ns = 3002;
+  unknown.classification = ProcessClass::Unknown;
+  unknown.protection_level = ProtectionLevel::Strong;
+  snapshot.processes.push_back(unknown);
+
+  SnapshotHistory history(2);
+  history.Add(snapshot);
+  const auto model = workboost::gui::DashboardPresenter::Build(
+      config, snapshot, history, {}, {}, std::nullopt, "");
+  const auto companion_view = std::find_if(
+      model.processes.begin(), model.processes.end(),
+      [](const workboost::gui::ProcessViewModel& process) {
+        return process.pid == 301;
+      });
+  const auto unknown_view = std::find_if(
+      model.processes.begin(), model.processes.end(),
+      [](const workboost::gui::ProcessViewModel& process) {
+        return process.pid == 302;
+      });
+  Check(companion_view != model.processes.end() &&
+            companion_view->cleanup_eligible &&
+            companion_view->cleanup_block_reason == "Ready to add",
+        "an optional visible Windows app should be available to select");
+  Check(unknown_view != model.processes.end() &&
+            !unknown_view->cleanup_eligible &&
+            unknown_view->cleanup_block_reason == "Protected by policy",
+        "an unknown process should be visible but unavailable to select");
+}
+
+void TestCodingModeCleanupRenderer() {
+  HWND window = CreateWindowExW(0, L"STATIC", L"WorkBoost cleanup test",
+                                WS_POPUP, 0, 0, 32, 32, nullptr, nullptr,
+                                GetModuleHandleW(nullptr), nullptr);
+  Check(window != nullptr, "cleanup renderer test window should be created");
+  struct Cleanup {
+    HWND window;
+    ~Cleanup() {
+      if (window != nullptr) DestroyWindow(window);
+    }
+  } cleanup{window};
+
+  workboost::gui::DashboardRenderer renderer;
+  Check(renderer.Initialize(window),
+        "cleanup renderer should initialize");
+  HDC dc = GetDC(window);
+  Check(dc != nullptr, "cleanup renderer device context should be available");
+  const int dpi = std::max(96, GetDeviceCaps(dc, LOGPIXELSX));
+  const RECT bounds{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
+  workboost::gui::DashboardViewModel model;
+  model.mode = "Monitor Mode";
+  workboost::gui::ProcessViewModel process;
+  process.pid = 301;
+  process.start_time_100ns = 3001;
+  process.name = "PhoneExperienceHost.exe";
+  process.cpu_percent = 1.5;
+  process.working_set_bytes = 64ULL * 1024 * 1024;
+  process.read_bytes_per_sec = 1024;
+  process.cleanup_eligible = true;
+  process.cleanup_block_reason = "Ready to add";
+  model.processes.push_back(process);
+  const std::optional<workboost::gui::DashboardViewModel> optional_model{model};
+
+  renderer.Paint(dc, bounds, optional_model,
+                 workboost::gui::DashboardPage::CodingMode, std::nullopt, "",
+                 {}, {});
+  const POINT process_row{MulDiv(300, dpi, 96), MulDiv(380, dpi, 96)};
+  const auto add = renderer.HitTest(process_row);
+  Check(add && add->action ==
+                   workboost::gui::DashboardUiAction::ToggleCleanupProcess &&
+            add->value == process.pid,
+        "Coding Mode process rows must expose cleanup selection targets");
+
+  workboost::gui::CodingModeViewOptions options;
+  options.cleanup_processes.push_back(
+      workboost::ProcessSelection{process.pid, process.start_time_100ns});
+  renderer.Paint(dc, bounds, optional_model,
+                 workboost::gui::DashboardPage::CodingMode, std::nullopt, "",
+                 {}, options);
+  const POINT pool_row{MulDiv(960, dpi, 96), MulDiv(360, dpi, 96)};
+  const auto remove = renderer.HitTest(pool_row);
+  ReleaseDC(window, dc);
+  Check(remove && remove->action ==
+                      workboost::gui::DashboardUiAction::ToggleCleanupProcess &&
+            remove->value == process.pid,
+        "cleanup pool rows must expose removal targets");
+}
+
+void TestExplicitCleanupPoolPlanning() {
+  Config config = Config::Defaults();
+  const auto optional_rule = config.RuleFor("PhoneExperienceHost.exe");
+  Check(optional_rule.process_class == ProcessClass::VendorUtility &&
+            optional_rule.protection == ProtectionLevel::Optimizable,
+        "optional Windows companion apps should be explicitly classified");
+
+  ProcessSnapshot companion;
+  companion.pid = 22;
+  companion.name = "PhoneExperienceHost.exe";
+  companion.start_time_100ns = 790;
+  companion.priority_class = NORMAL_PRIORITY_CLASS;
+  companion.classification = optional_rule.process_class;
+  companion.protection_level = optional_rule.protection;
+  companion.has_visible_window = true;
+  SystemSnapshot snapshot;
+  snapshot.processes = {companion};
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  const workboost::ProcessSelection selection{companion.pid,
+                                               companion.start_time_100ns};
+  const auto plan = OptimizationPlanner(config).Create(snapshot, {selection});
+  Check(plan.actions.size() == 1 &&
+            plan.actions[0].type == ActionType::GracefulCloseProcess &&
+            plan.actions[0].explicit_confirmation &&
+            plan.actions[0].process_name == companion.name,
+        "a user-selected optional app should create one confirmed close");
+  std::string reason;
+  Check(SafetyValidator(config).Validate(plan.actions[0], snapshot, &reason),
+        "the validator should accept the same live, unprotected identity");
+
+  const auto wrong_identity = OptimizationPlanner(config).Create(
+      snapshot,
+      {workboost::ProcessSelection{companion.pid,
+                                   companion.start_time_100ns + 1}});
+  Check(wrong_identity.actions.empty(),
+        "a reused or restarted PID must be rejected from the cleanup pool");
+
+  snapshot.processes[0].is_foreground = true;
+  Check(OptimizationPlanner(config).Create(snapshot, {selection})
+            .actions.empty(),
+        "a selected process that becomes foreground must be rejected");
+  snapshot.processes[0].is_foreground = false;
+  snapshot.tcp_sessions.push_back(
+      TcpSession{companion.pid, "127.0.0.1", 50002, "10.0.0.3", 22,
+                 TcpState::Established, false});
+  Check(OptimizationPlanner(config).Create(snapshot, {selection})
+            .actions.empty(),
+        "an active protected remote session must override manual selection");
+
+  ProcessSnapshot unknown = companion;
+  unknown.pid = 23;
+  unknown.name = "UnknownNativeHost.exe";
+  unknown.start_time_100ns = 791;
+  unknown.classification = ProcessClass::Unknown;
+  unknown.protection_level = ProtectionLevel::Strong;
+  snapshot.processes = {unknown};
+  snapshot.tcp_sessions.clear();
+  Check(OptimizationPlanner(config)
+            .Create(snapshot,
+                    {workboost::ProcessSelection{unknown.pid,
+                                                 unknown.start_time_100ns}})
+            .actions.empty(),
+        "unknown processes must stay fail-closed even when selected");
+}
+
+void TestDashboardTopImpactMetrics() {
+  Config config = Config::Defaults();
+  SystemSnapshot snapshot;
+  snapshot.timestamp = std::chrono::system_clock::now();
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  ProcessSnapshot io_first;
+  io_first.pid = 101;
+  io_first.name = "io-worker.exe";
+  io_first.read_bytes_per_sec = 3.0 * 1024 * 1024;
+  snapshot.processes.push_back(io_first);
+  ProcessSnapshot io_second = io_first;
+  io_second.pid = 102;
+  snapshot.processes.push_back(io_second);
+
+  ProcessSnapshot terminal_first;
+  terminal_first.pid = 201;
+  terminal_first.name = "terminal.exe";
+  terminal_first.cpu_percent = 3.0;
+  terminal_first.private_bytes = 300ULL * 1024 * 1024;
+  snapshot.processes.push_back(terminal_first);
+  ProcessSnapshot terminal_second = terminal_first;
+  terminal_second.pid = 202;
+  snapshot.processes.push_back(terminal_second);
+
+  SnapshotHistory history(4);
+  history.Add(snapshot);
+  const auto model = workboost::gui::DashboardPresenter::Build(
+      config, snapshot, history, {}, {}, std::nullopt, "");
+  Check(model.top_impacts.size() == 2,
+        "Top Impact must aggregate processes with the same executable name");
+  const auto& io = model.top_impacts[0];
+  const auto& terminal = model.top_impacts[1];
+  Check(io.name == "io-worker.exe" &&
+            io.io_bytes_per_sec == 6.0 * 1024 * 1024 &&
+            io.cpu_impact == workboost::gui::ImpactLevel::Low &&
+            io.memory_impact == workboost::gui::ImpactLevel::Low &&
+            io.io_impact == workboost::gui::ImpactLevel::Medium &&
+            io.impact == workboost::gui::ImpactLevel::Medium,
+        "aggregated I/O must determine the displayed impact level");
+  Check(terminal.name == "terminal.exe" && terminal.cpu_percent == 6.0 &&
+            terminal.private_bytes == 600ULL * 1024 * 1024 &&
+            terminal.io_bytes_per_sec == 0.0 &&
+            terminal.cpu_impact == workboost::gui::ImpactLevel::Medium &&
+            terminal.memory_impact == workboost::gui::ImpactLevel::Medium &&
+            terminal.io_impact == workboost::gui::ImpactLevel::Low &&
+            terminal.impact == workboost::gui::ImpactLevel::Medium,
+        "a zero-I/O Medium row must expose its CPU and memory triggers");
+}
+
+void TestDashboardOverviewLayout() {
+  const auto regular = workboost::gui::CalculateDashboardOverviewLayout(
+      424, 538, 4, 18, 15);
+  Check(regular.fits && !regular.compact && regular.disk_columns == 1 &&
+            regular.primary_line_height == 20 &&
+            regular.metric_row_height == 38 && regular.disk_rows == 4 &&
+            regular.required_height == 318,
+        "four disks should stay in one aligned column when height permits");
+
+  const auto constrained = workboost::gui::CalculateDashboardOverviewLayout(
+      274, 389, 8, 18, 15);
+  Check(constrained.fits && constrained.compact &&
+            constrained.primary_line_height == 19 &&
+            constrained.metric_row_height == 35 &&
+            constrained.disk_columns == 3 && constrained.disk_rows == 3 &&
+            constrained.required_height == 262,
+        "a constrained overview should compact and flow disks into columns");
+
+  const auto many_disks = workboost::gui::CalculateDashboardOverviewLayout(
+      424, 538, 26, 18, 15);
+  Check(many_disks.fits && many_disks.compact &&
+            many_disks.disk_columns == 4 && many_disks.disk_rows == 7 &&
+            many_disks.required_height == 402,
+        "the initial dashboard size should adapt to every drive letter");
+
+  const auto empty = workboost::gui::CalculateDashboardOverviewLayout(
+      220, 300, 0, 18, 15);
+  Check(empty.fits && empty.disk_columns == 1 && empty.disk_rows == 1,
+        "an empty disk inventory should reserve one status row");
+}
+
+void TestDashboardCloseBehavior() {
+  using workboost::gui::DashboardCloseDisposition;
+  using workboost::gui::DashboardCloseRequest;
+  using workboost::gui::ResolveDashboardClose;
+
+  Check(ResolveDashboardClose(DashboardCloseRequest::WindowClose, false) ==
+                DashboardCloseDisposition::HideToTray &&
+            ResolveDashboardClose(DashboardCloseRequest::WindowClose, true) ==
+                DashboardCloseDisposition::HideToTray,
+        "the title-bar close button must always hide the dashboard to tray");
+  Check(ResolveDashboardClose(DashboardCloseRequest::ExplicitExit, true) ==
+                DashboardCloseDisposition::KeepOpen &&
+            ResolveDashboardClose(DashboardCloseRequest::ExplicitExit,
+                                  false) ==
+                DashboardCloseDisposition::Exit,
+        "only an idle explicit tray command may exit WorkBoost");
+
+  const auto left_click = workboost::gui::DecodeDashboardTrayNotification(
+      static_cast<std::uintptr_t>(MAKELPARAM(WM_LBUTTONUP, 1)), true);
+  const auto right_click = workboost::gui::DecodeDashboardTrayNotification(
+      static_cast<std::uintptr_t>(MAKELPARAM(WM_RBUTTONUP, 1)), true);
+  Check(left_click.event_code == WM_LBUTTONUP && left_click.icon_id == 1 &&
+            right_click.event_code == WM_RBUTTONUP &&
+            right_click.icon_id == 1,
+        "version 4 tray callbacks must decode their packed event and icon ID");
 }
 
 void TestDashboardRendererHitTargets() {
@@ -1147,17 +1599,44 @@ void TestDashboardRendererHitTargets() {
 
   workboost::gui::DashboardRenderer renderer;
   Check(renderer.Initialize(window), "native dashboard renderer should initialize");
-  HDC dc = GetDC(window);
-  Check(dc != nullptr, "renderer test device context should be available");
-  const int dpi = std::max(96, GetDeviceCaps(dc, LOGPIXELSX));
+  HDC window_dc = GetDC(window);
+  Check(window_dc != nullptr,
+        "renderer test device context should be available");
+  const int dpi = std::max(96, GetDeviceCaps(window_dc, LOGPIXELSX));
   const RECT bounds{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
+  HDC dc = CreateCompatibleDC(window_dc);
+  HBITMAP bitmap =
+      CreateCompatibleBitmap(window_dc, bounds.right, bounds.bottom);
+  Check(dc != nullptr && bitmap != nullptr,
+        "renderer test back buffer should be created");
+  const HGDIOBJ previous_bitmap = SelectObject(dc, bitmap);
   workboost::gui::DashboardViewModel model;
   model.mode = "Monitor Mode";
+  model.system.cpu_percent = 25.0;
   model.system.memory_total_bytes = 1;
   const std::optional<workboost::gui::DashboardViewModel> optional_model{model};
   renderer.Paint(dc, bounds, optional_model,
                  workboost::gui::DashboardPage::Dashboard, std::nullopt, "");
-  ReleaseDC(window, dc);
+
+  const auto scale = [dpi](int value) { return MulDiv(value, dpi, 96); };
+  const int cpu_row_top = scale(72) + scale(24) + scale(44);
+  const int cpu_bar_left = scale(200) + scale(24) + scale(16) + scale(72) +
+                           scale(12) + scale(170) + scale(12);
+  const int aligned_track_y =
+      cpu_row_top + (scale(20) - scale(5)) / 2 + scale(2);
+  const int former_track_y = cpu_row_top + scale(15) + scale(2);
+  const int track_x = cpu_bar_left + scale(10);
+  const COLORREF aligned_color = GetPixel(dc, track_x, aligned_track_y);
+  const COLORREF former_color = GetPixel(dc, track_x, former_track_y);
+
+  SelectObject(dc, previous_bitmap);
+  DeleteObject(bitmap);
+  DeleteDC(dc);
+  ReleaseDC(window, window_dc);
+  Check(aligned_color == RGB(48, 104, 189) &&
+            former_color == RGB(255, 255, 255),
+        "CPU progress must share the primary text row instead of sitting "
+        "below it");
 
   const POINT process_navigation{MulDiv(50, dpi, 96),
                                  MulDiv(150, dpi, 96)};
@@ -1215,6 +1694,99 @@ void TestCodingModeCommandValidation() {
   Check(!above_maximum.launched &&
             above_maximum.error.code == ERROR_INVALID_PARAMETER,
         "oversized Coding Mode baseline must fail before launching a process");
+
+  const auto invalid_selection =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::Enter, 10,
+          {workboost::ProcessSelection{0, 1}});
+  Check(!invalid_selection.launched &&
+            invalid_selection.error.code == ERROR_INVALID_PARAMETER,
+        "an invalid cleanup identity must fail before process launch");
+  const auto selection_on_exit =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::Exit, 10,
+          {workboost::ProcessSelection{1, 1}});
+  Check(!selection_on_exit.launched &&
+            selection_on_exit.error.code == ERROR_INVALID_PARAMETER,
+        "cleanup selections must only be accepted by Coding Mode enter");
+
+  const auto retry_empty =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::RetryClose, 10, {});
+  Check(!retry_empty.launched &&
+            retry_empty.error.code == ERROR_INVALID_PARAMETER,
+        "retry-close requires at least one cleanup selection");
+  const auto retry_invalid =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::RetryClose, 10,
+          {workboost::ProcessSelection{0, 1}});
+  Check(!retry_invalid.launched &&
+            retry_invalid.error.code == ERROR_INVALID_PARAMETER,
+        "retry-close must reject an invalid cleanup identity");
+  const auto selection_on_restore =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::Restore, 10,
+          {workboost::ProcessSelection{1, 1}});
+  Check(!selection_on_restore.launched &&
+            selection_on_restore.error.code == ERROR_INVALID_PARAMETER,
+        "cleanup selections must not be accepted by recovery restore");
+}
+
+void TestUnclosedProcessCollection() {
+  workboost::OptimizationSession session;
+  workboost::ExecutedAction running;
+  running.action.type = ActionType::GracefulCloseProcess;
+  running.action.pid = 301;
+  running.action.expected_start_time_100ns = 9001;
+  running.action.process_name = "ExampleUpdater.exe";
+  running.state = ActionState::Completed;
+  session.actions.push_back(running);
+
+  workboost::ExecutedAction exited = running;
+  exited.action.pid = 302;
+  exited.action.expected_start_time_100ns = 9002;
+  session.actions.push_back(exited);
+
+  workboost::ExecutedAction reused = running;
+  reused.action.pid = 303;
+  reused.action.expected_start_time_100ns = 8888;
+  session.actions.push_back(reused);
+
+  SystemSnapshot snapshot;
+  ProcessSnapshot still_running;
+  still_running.pid = 301;
+  still_running.start_time_100ns = 9001;
+  still_running.name = "ExampleUpdater.exe";
+  snapshot.processes.push_back(still_running);
+  ProcessSnapshot new_instance;
+  new_instance.pid = 303;
+  new_instance.start_time_100ns = 9999;
+  new_instance.name = "ExampleUpdater.exe";
+  snapshot.processes.push_back(new_instance);
+
+  const auto unclosed =
+      workboost::SessionManager::CollectUnclosedProcesses(session, snapshot);
+  Check(unclosed.size() == 1 && unclosed[0].pid == 301 &&
+            unclosed[0].start_time_100ns == 9001 &&
+            unclosed[0].name == "ExampleUpdater.exe",
+        "only the exact PID+start-time target that is still running counts");
+}
+
+void TestParseUnclosedProcessSelections() {
+  const std::string output =
+      "Coding Mode exited.\n"
+      "UNCLOSED_PROCESS pid=301 start=9001 name=ExampleUpdater.exe\n"
+      "UNCLOSED_PROCESS pid=302 start=9002 name=second app.exe\r\n"
+      "UNCLOSED_PROCESS pid=301 start=9001 name=duplicate\n"
+      "junk line\n"
+      "UNCLOSED_PROCESS pid=bad start=1 name=broken\n";
+  const auto selections =
+      workboost::gui::ParseUnclosedProcessSelections(output);
+  Check(selections.size() == 2 && selections[0].pid == 301 &&
+            selections[0].expected_start_time_100ns == 9001 &&
+            selections[1].pid == 302 &&
+            selections[1].expected_start_time_100ns == 9002,
+        "GUI must parse stable unclosed-process lines and deduplicate them");
 }
 
 void TestCompletionReport() {
@@ -1595,6 +2167,7 @@ void TestSessionRoundTrip() {
   close.action.expected_start_time_100ns = 100;
   close.action.process_name = "ExampleUpdater.exe";
   close.action.timeout_ms = 1500;
+  close.action.explicit_confirmation = true;
   close.action.reason = "explicit close test";
   close.state = ActionState::Uncertain;
   close.error_code = ERROR_NOT_SUPPORTED;
@@ -1647,6 +2220,7 @@ void TestSessionRoundTrip() {
   Check(parsed->actions[1].action.type == ActionType::GracefulCloseProcess &&
             parsed->actions[1].action.risk == ActionRisk::Low &&
             parsed->actions[1].action.timeout_ms == 1500 &&
+            parsed->actions[1].action.explicit_confirmation &&
             parsed->actions[1].state == ActionState::Uncertain &&
             parsed->actions[1].result_message == close.result_message,
         "one-shot recovery metadata must round-trip");
@@ -1841,6 +2415,14 @@ void TestLocale() {
   Locale::Set(LocaleId::Chinese);
   Check(Locale::Get("Dashboard") == "仪表盘",
         "Chinese locale must translate known keys");
+  Check(Locale::Get("Commit") == "提交内存",
+        "Chinese locale must clarify the committed-memory metric");
+  Check(Locale::Get("Cleanup Pool") == "清理池" &&
+            Locale::Get("Protected by policy") == "受策略保护",
+        "Chinese locale must translate cleanup selection states");
+  Check(Locale::Get("Cleanup retry completed.") == "清理重试已完成。" &&
+            Locale::Get("Retry Cleanup") == "重试清理",
+        "Chinese locale must translate retry-close prompts");
   Check(!Locale::Get("Settings").empty(),
         "Chinese settings label must be non-empty");
   Check(Locale::Format("{0} planned changes", {"5"}) == "5 项计划变更",
@@ -1877,6 +2459,34 @@ void TestConfigLanguage() {
   const workboost::Config defaults = workboost::Config::Defaults();
   Check(defaults.language == "en" || defaults.language == "zh",
         "default language must be a known value");
+  Check(defaults.coding_profile.graceful_close_batch_budget_ms == 5000,
+        "graceful-close shared budget must default to 5000 ms");
+
+  const std::filesystem::path budget_directory =
+      std::filesystem::temp_directory_path() /
+      ("workboost-budget-test-" + std::to_string(GetCurrentProcessId()) + "-" +
+       std::to_string(GetTickCount64()));
+  std::error_code budget_error;
+  std::filesystem::create_directories(budget_directory, budget_error);
+  Check(!budget_error, "temporary budget directory should be created");
+  struct BudgetCleanup {
+    std::filesystem::path path;
+    ~BudgetCleanup() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } budget_cleanup{budget_directory};
+  Check(workboost::windows::AtomicWriteUtf8(
+            budget_directory / "profiles.json",
+            "{\n  \"profiles\": {\n    \"coding\": {\n"
+            "      \"graceful_close_batch_budget_ms\": 8000\n    }\n  }\n}\n",
+            &error),
+        "budget profiles.json fixture should be written: " + error);
+  workboost::Config loaded = workboost::Config::Defaults();
+  std::string load_warning;
+  Check(loaded.LoadDirectory(budget_directory, &load_warning) &&
+            loaded.coding_profile.graceful_close_batch_budget_ms == 8000,
+        "shared graceful-close budget must load from profiles.json");
 }
 
 void TestHardwareInfo() {
@@ -1913,6 +2523,9 @@ int main() {
       {"safety validator", TestSafetyValidator},
       {"graceful close planning and protection",
        TestGracefulClosePlanningAndProtection},
+      {"window protection context", TestWindowProtectionContext},
+      {"windowed planner protection", TestWindowedPlannerProtection},
+      {"explicit cleanup pool planning", TestExplicitCleanupPoolPlanning},
       {"service protection policy", TestServiceProtectionPolicy},
       {"service action planning and validation",
        TestServiceActionPlanningAndValidation},
@@ -1927,6 +2540,7 @@ int main() {
        TestCurrentProcessVerificationHelpers},
       {"graceful close recovery state", TestGracefulCloseRecoveryState},
       {"real graceful close request", TestRealGracefulCloseRequest},
+      {"graceful close batch executor", TestGracefulCloseBatchExecutor},
       {"read-only service query", TestReadOnlyServiceQuery},
       {"read-only serial port query", TestReadOnlySerialPortQuery},
       {"read-only startup query", TestReadOnlyStartupQuery},
@@ -1935,10 +2549,18 @@ int main() {
       {"passive startup benchmark timeout",
        TestPassiveStartupBenchmarkTimeout},
       {"dashboard presenter", TestDashboardPresenter},
+      {"dashboard cleanup eligibility", TestDashboardCleanupEligibility},
+      {"Coding Mode cleanup renderer", TestCodingModeCleanupRenderer},
+      {"dashboard Top Impact metrics", TestDashboardTopImpactMetrics},
+      {"dashboard overview responsive layout", TestDashboardOverviewLayout},
+      {"dashboard close behavior", TestDashboardCloseBehavior},
       {"dashboard renderer hit targets", TestDashboardRendererHitTargets},
       {"dashboard language toggle target",
        TestDashboardLanguageToggleTarget},
       {"Coding Mode command validation", TestCodingModeCommandValidation},
+      {"unclosed process collection", TestUnclosedProcessCollection},
+      {"unclosed process selections parsing",
+       TestParseUnclosedProcessSelections},
       {"completion report", TestCompletionReport},
       {"diagnosis rules", TestDiagnosisRules},
       {"benchmark window aggregation", TestBenchmarkWindowAggregation},

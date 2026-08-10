@@ -63,6 +63,7 @@ struct DiagnosisViewModel {
 
 struct ProcessViewModel {
   std::uint32_t pid{};
+  std::uint64_t start_time_100ns{};
   std::string name;
   double cpu_percent{};
   std::uint64_t working_set_bytes{};
@@ -73,6 +74,22 @@ struct ProcessViewModel {
   std::string protection;
   ImpactLevel impact{ImpactLevel::Low};
   bool protected_workload{};
+  bool has_visible_window{};
+  bool is_foreground{};
+  bool cleanup_eligible{};
+  bool cleanup_already_planned{};
+  std::string cleanup_block_reason;
+};
+
+struct TopImpactViewModel {
+  std::string name;
+  double cpu_percent{};
+  std::uint64_t private_bytes{};
+  double io_bytes_per_sec{};
+  ImpactLevel cpu_impact{ImpactLevel::Low};
+  ImpactLevel memory_impact{ImpactLevel::Low};
+  ImpactLevel io_impact{ImpactLevel::Low};
+  ImpactLevel impact{ImpactLevel::Low};
 };
 
 struct ProtectedWorkloadViewModel {
@@ -164,6 +181,7 @@ struct DashboardViewModel {
   std::vector<DiskViewModel> disks;
   std::vector<DiagnosisViewModel> diagnoses;
   std::vector<ProcessViewModel> processes;
+  std::vector<TopImpactViewModel> top_impacts;
   std::vector<ProtectedWorkloadViewModel> protected_workloads;
   CodingModeViewModel coding_mode;
   RecoveryViewModel recovery;
@@ -186,5 +204,11 @@ class DashboardPresenter {
       const std::vector<CompletionReportSummary>& reports = {},
       const std::string& report_error = {});
 };
+
+// Parses the stable "UNCLOSED_PROCESS pid=... start=... name=..." lines that
+// `coding exit` emits for processes still running after WM_CLOSE. The name is
+// display-only; the returned selections carry PID + start time for revalidation.
+[[nodiscard]] std::vector<ProcessSelection> ParseUnclosedProcessSelections(
+    const std::string& output);
 
 }  // namespace workboost::gui

@@ -3,6 +3,7 @@
 #include "platform/windows/windows_utils.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace workboost::windows {
 
@@ -17,6 +18,17 @@ struct GracefulCloseResult {
   bool delivery_uncertain{};
   std::uint32_t windows_signaled{};
   bool process_exited{};
+  WindowsError error;
+};
+
+struct GracefulCloseRequest {
+  std::uint32_t pid{};
+  std::uint64_t expected_start_time_100ns{};
+};
+
+struct GracefulCloseBatchResult {
+  // Results align one-to-one with the input requests.
+  std::vector<GracefulCloseResult> results;
   WindowsError error;
 };
 
@@ -37,6 +49,13 @@ class ProcessActionApi {
   static GracefulCloseResult RequestGracefulClose(
       std::uint32_t pid, std::uint64_t expected_start_time_100ns,
       std::uint32_t timeout_ms);
+
+  // Sends WM_CLOSE to every visible top-level window of each request and
+  // shares one deadline across all targets. Worker threads are bounded; the
+  // result vector preserves request order. Never terminates a process.
+  static GracefulCloseBatchResult RequestGracefulCloseBatch(
+      const std::vector<GracefulCloseRequest>& requests,
+      std::uint32_t shared_timeout_ms);
 };
 
 }  // namespace workboost::windows

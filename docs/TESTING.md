@@ -4,7 +4,7 @@ WorkBoost 的自动测试以“只读验证优先、修改范围最小、保护�
 
 ## 自动化测试范围
 
-当前测试程序包含 31 个用例，覆盖：
+当前测试程序覆盖：
 
 - Commit Ratio 归一化和除零保护；
 - 进程 CPU 按逻辑处理器数归一化、无效分母保护和上限；
@@ -13,6 +13,10 @@ WorkBoost 的自动测试以“只读验证优先、修改范围最小、保护�
   内置 TCP 22/23 基线；
 - Wireshark/dumpcap Active Capture 保护；
 - 优先级、Graceful Close 和临时服务动作的计划与二次安全校验；
+- Coding Mode 清理池的 PID/启动时间身份绑定、显式确认、前台/远程/Unknown 拒绝、进程列表资源列与点击命中；
+- 基线窗口保护并集（窗口内任意采样点的远程会话/抓包持续保护）与完整样本覆盖率 fail-closed；
+- 多目标共享截止时间的批量 WM_CLOSE 投递、结果顺序保持和受保护/缺失目标拒绝；
+- 退出后未关闭进程的精确身份收集、`UNCLOSED_PROCESS` 输出与 `retry-close` 轻量会话/报告链路；
 - 系统关键服务、VPN/EDR、远程连接宿主，以及不完整进程/TCP 清单下对降优先级、Graceful Close 和服务控制的 fail-closed 保护；
 - 畸形/越界配置的安全回退和数值上限；
 - 1 MiB 配置上限，以及只有文件名的相对路径原子输出；
@@ -89,7 +93,12 @@ GUI 验证应检查：
 2. Dashboard、Processes、Diagnosis、Coding Mode、Protected Workload、Recovery、Settings 七页均可切换。
 3. 后台采样持续刷新，UI 线程不执行采样或 SCM 控制。
 4. Refresh 只请求新采样；Export all 输出七页当前脱敏视图。
-5. 关闭窗口后后台线程在有限时间内退出。
+5. 标题栏关闭按钮和最小化都会隐藏到托盘，进程继续采样；左键单击托盘图标可恢复窗口。
+6. 右键单击托盘图标会显示包含“打开”和“退出”的菜单；只有“退出”会结束进程，随后后台线程在有限时间内退出。
+7. Coding Mode 左侧完整进程列表显示 CPU、Working Set、Disk I/O 与可选状态，可滚动；可选进程优先显示。
+8. 左键单击可选进程后，它出现在右侧清理池；再次单击任一侧对应行会移出。受保护或无可见窗口的进程不能加入。
+9. 使用受控测试窗口验证进入 Coding Mode 会传递 PID/启动时间并发送 `WM_CLOSE`；不要用自动测试关闭用户当前应用。
+10. 使用一个忽略 `WM_CLOSE` 的隔离测试窗口验证：退出后输出 `UNCLOSED_PROCESS`，GUI 弹窗询问重试，`coding retry-close` 重新投递并生成独立报告；重试后进程仍存活时 WorkBoost 不得强杀。
 
 当前开发机的最新 12 秒持续监控测量：
 
@@ -136,6 +145,7 @@ workboost benchmark compare codex.exe --duration 60 --label coding-mode --json -
 12. 在测试服务 Stop 成功但结果落盘前模拟崩溃，确认 `recovery restore` 对 Planned 动作执行幂等 Start。
 13. 完成 Baseline/Optimized 各三次真实启动观察，核对窗口可见/响应计时和 Median Delta。
 14. 重测空闲 CPU、持续监控 CPU 和 Private Bytes 预算。
+15. 用忽略 `WM_CLOSE` 的隔离测试进程完整执行 enter → exit → retry-close，确认窗口保护并集与共享超时行为。
 
 真实服务测试只能针对隔离机上的专用服务，绝不能使用业务、VPN、EDR、远程接入、抓包或设备服务。
 

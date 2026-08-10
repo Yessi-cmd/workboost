@@ -7,12 +7,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -40,6 +42,28 @@ std::string FormatBytes(double bytes) {
 
 std::string FormatRate(double bytes_per_second) {
   return FormatBytes(bytes_per_second) + "/s";
+}
+
+std::vector<std::string> SplitVolumeNames(const std::string& volumes) {
+  std::vector<std::string> result;
+  std::istringstream input(volumes);
+  std::string volume;
+  while (input >> volume) {
+    if (volume.size() == 2 &&
+        std::isalpha(static_cast<unsigned char>(volume[0])) &&
+        volume[1] == ':') {
+      result.push_back(std::move(volume));
+    }
+  }
+  return result;
+}
+
+int DiskSortRank(const std::string& name) {
+  if (name.size() == 2 &&
+      std::isalpha(static_cast<unsigned char>(name[0])) && name[1] == ':') {
+    return std::toupper(static_cast<unsigned char>(name[0]));
+  }
+  return 256;
 }
 
 std::string InventoryState(bool complete) {
@@ -84,21 +108,52 @@ std::vector<const ProcessSnapshot*> SortedProcesses(
   return processes;
 }
 
-ImpactLevel ProcessImpact(const Config& config,
-                          const ProcessSnapshot& process) {
-  const double io = process.IoBytesPerSec();
+int ImpactRank(ImpactLevel impact) {
+  switch (impact) {
+    case ImpactLevel::High: return 2;
+    case ImpactLevel::Medium: return 1;
+    case ImpactLevel::Low: return 0;
+  }
+  return 0;
+}
+
+struct ImpactBreakdown {
+  ImpactLevel cpu{ImpactLevel::Low};
+  ImpactLevel memory{ImpactLevel::Low};
+  ImpactLevel io{ImpactLevel::Low};
+  ImpactLevel overall{ImpactLevel::Low};
+};
+
+ImpactLevel ThresholdImpact(double value, double medium, double high) {
+  if (value >= high) return ImpactLevel::High;
+  if (value >= medium) return ImpactLevel::Medium;
+  return ImpactLevel::Low;
+}
+
+ImpactBreakdown CalculateImpact(const Config& config, double cpu_percent,
+                                std::uint64_t private_bytes,
+                                double io_bytes_per_sec) {
   const double high_io =
       std::max(1.0, config.thresholds.background_io_bytes_per_sec * 2.0);
   const double medium_io = high_io * 0.25;
-  if (io >= high_io || process.cpu_percent >= 20.0 ||
-      process.private_bytes >= 2ULL * 1024 * 1024 * 1024) {
-    return ImpactLevel::High;
-  }
-  if (io >= medium_io || process.cpu_percent >= 5.0 ||
-      process.private_bytes >= 512ULL * 1024 * 1024) {
-    return ImpactLevel::Medium;
-  }
-  return ImpactLevel::Low;
+  ImpactBreakdown result;
+  result.cpu = ThresholdImpact(cpu_percent, 5.0, 20.0);
+  result.memory = ThresholdImpact(static_cast<double>(private_bytes),
+                                  512.0 * kMiB, 2.0 * kGiB);
+  result.io = ThresholdImpact(io_bytes_per_sec, medium_io, high_io);
+  result.overall =
+      std::max({result.cpu, result.memory, result.io},
+               [](ImpactLevel left, ImpactLevel right) {
+                 return ImpactRank(left) < ImpactRank(right);
+               });
+  return result;
+}
+
+ImpactLevel ProcessImpact(const Config& config,
+                          const ProcessSnapshot& process) {
+  return CalculateImpact(config, process.cpu_percent, process.private_bytes,
+                         process.IoBytesPerSec())
+      .overall;
 }
 
 std::string WorkloadCategory(ProcessClass value) {
@@ -249,21 +304,26 @@ std::string BuildDashboard(const SystemSnapshot& snapshot) {
     output << "No physical disk counters available.\r\n";
   }
   for (const auto& disk : snapshot.disks) {
-    output << std::left << std::setw(14)
-           << (disk.volumes.empty() ? disk.instance : disk.volumes)
-           << std::setw(9) << ToString(disk.media) << std::right
-           << std::setw(6) << disk.active_ratio * 100.0 << "%  "
-           << std::setw(8) << disk.average_latency_ms << " ms  "
-           << FormatRate(disk.read_bytes_per_sec +
-                         disk.write_bytes_per_sec)
-           << "  " << disk.IoOperationsPerSec() << " IOPS";
-    if (disk.space_inventory_complete) {
-      output << "  free "
-             << FormatBytes(static_cast<double>(disk.free_space_bytes))
-             << " / "
-             << FormatBytes(static_cast<double>(disk.total_space_bytes));
+    auto volumes = SplitVolumeNames(disk.volumes);
+    if (volumes.empty()) {
+      volumes.push_back(disk.volumes.empty() ? disk.instance : disk.volumes);
     }
-    output << "\r\n";
+    for (const auto& volume : volumes) {
+      output << std::left << std::setw(14) << volume << std::setw(9)
+             << ToString(disk.media) << std::right << std::setw(6)
+             << disk.active_ratio * 100.0 << "%  " << std::setw(8)
+             << disk.average_latency_ms << " ms  "
+             << FormatRate(disk.read_bytes_per_sec +
+                           disk.write_bytes_per_sec)
+             << "  " << disk.IoOperationsPerSec() << " IOPS";
+      if (disk.space_inventory_complete) {
+        output << "  free "
+               << FormatBytes(static_cast<double>(disk.free_space_bytes))
+               << " / "
+               << FormatBytes(static_cast<double>(disk.total_space_bytes));
+      }
+      output << "\r\n";
+    }
   }
 
   const auto processes = SortedProcesses(snapshot);
@@ -588,16 +648,30 @@ DashboardViewModel DashboardPresenter::Build(
       snapshot.process_inventory_complete;
   model.system.tcp_inventory_complete = snapshot.tcp_inventory_complete;
   for (const auto& disk : snapshot.disks) {
-    DiskViewModel view;
-    view.name = disk.volumes.empty() ? disk.instance : disk.volumes;
-    view.media = ToString(disk.media);
-    view.active_percent = disk.active_ratio * 100.0;
-    view.latency_ms = disk.average_latency_ms;
-    view.queue_length = disk.queue_length;
-    view.throughput_bytes_per_sec =
-        disk.read_bytes_per_sec + disk.write_bytes_per_sec;
-    model.disks.push_back(std::move(view));
+    auto volumes = SplitVolumeNames(disk.volumes);
+    if (volumes.empty()) {
+      volumes.push_back(disk.volumes.empty() ? disk.instance : disk.volumes);
+    }
+    for (const auto& volume : volumes) {
+      DiskViewModel view;
+      view.name = volume;
+      view.media = ToString(disk.media);
+      view.active_percent = disk.active_ratio * 100.0;
+      view.latency_ms = disk.average_latency_ms;
+      view.queue_length = disk.queue_length;
+      view.throughput_bytes_per_sec =
+          disk.read_bytes_per_sec + disk.write_bytes_per_sec;
+      model.disks.push_back(std::move(view));
+    }
   }
+  std::stable_sort(
+      model.disks.begin(), model.disks.end(),
+      [](const DiskViewModel& left, const DiskViewModel& right) {
+        const int left_rank = DiskSortRank(left.name);
+        const int right_rank = DiskSortRank(right.name);
+        if (left_rank != right_rank) return left_rank < right_rank;
+        return left.name < right.name;
+      });
   for (const auto& diagnosis : diagnoses) {
     DiagnosisViewModel view;
     view.severity = ToString(diagnosis.severity);
@@ -609,13 +683,59 @@ DashboardViewModel DashboardPresenter::Build(
     }
     model.diagnoses.push_back(std::move(view));
   }
+  std::unordered_map<std::string, std::size_t> top_impact_by_name;
+  for (const auto& process : snapshot.processes) {
+    const auto [position, inserted] =
+        top_impact_by_name.emplace(process.name, model.top_impacts.size());
+    if (inserted) {
+      TopImpactViewModel view;
+      view.name = process.name;
+      model.top_impacts.push_back(std::move(view));
+    }
+    auto& aggregate = model.top_impacts[position->second];
+    aggregate.cpu_percent += process.cpu_percent;
+    aggregate.private_bytes += process.private_bytes;
+    aggregate.io_bytes_per_sec += process.IoBytesPerSec();
+  }
+  for (auto& process : model.top_impacts) {
+    const auto impact = CalculateImpact(config, process.cpu_percent,
+                                        process.private_bytes,
+                                        process.io_bytes_per_sec);
+    process.cpu_impact = impact.cpu;
+    process.memory_impact = impact.memory;
+    process.io_impact = impact.io;
+    process.impact = impact.overall;
+  }
+  std::stable_sort(
+      model.top_impacts.begin(), model.top_impacts.end(),
+      [](const TopImpactViewModel& left, const TopImpactViewModel& right) {
+        if (ImpactRank(left.impact) != ImpactRank(right.impact)) {
+          return ImpactRank(left.impact) > ImpactRank(right.impact);
+        }
+        if (left.io_bytes_per_sec != right.io_bytes_per_sec) {
+          return left.io_bytes_per_sec > right.io_bytes_per_sec;
+        }
+        if (left.cpu_percent != right.cpu_percent) {
+          return left.cpu_percent > right.cpu_percent;
+        }
+        if (left.private_bytes != right.private_bytes) {
+          return left.private_bytes > right.private_bytes;
+        }
+        return left.name < right.name;
+      });
   const auto sorted_processes = SortedProcesses(snapshot);
-  const std::size_t process_count =
-      std::min<std::size_t>(200, sorted_processes.size());
+  std::unordered_set<std::uint32_t> planned_close_pids;
+  for (const auto& action : plan.actions) {
+    if (action.type == ActionType::GracefulCloseProcess) {
+      planned_close_pids.insert(action.pid);
+    }
+  }
+  const std::size_t process_count = sorted_processes.size();
   for (std::size_t i = 0; i < process_count; ++i) {
     const auto& process = *sorted_processes[i];
     ProcessViewModel view;
     view.pid = process.pid;
+    view.start_time_100ns = process.start_time_100ns;
     view.name = process.name;
     view.cpu_percent = process.cpu_percent;
     view.working_set_bytes = process.working_set_bytes;
@@ -626,6 +746,27 @@ DashboardViewModel DashboardPresenter::Build(
     view.protection = ToString(policy.Evaluate(process, context));
     view.impact = ProcessImpact(config, process);
     view.protected_workload = policy.IsProtected(process, context);
+    view.has_visible_window = process.has_visible_window;
+    view.is_foreground = process.is_foreground;
+    view.cleanup_already_planned =
+        planned_close_pids.count(process.pid) != 0;
+    if (!snapshot.process_inventory_complete ||
+        !snapshot.tcp_inventory_complete) {
+      view.cleanup_block_reason = "Protection inventory is incomplete";
+    } else if (process.start_time_100ns == 0) {
+      view.cleanup_block_reason = "Process identity is unavailable";
+    } else if (view.protected_workload) {
+      view.cleanup_block_reason = "Protected by policy";
+    } else if (process.is_foreground) {
+      view.cleanup_block_reason = "Foreground process";
+    } else if (!process.has_visible_window) {
+      view.cleanup_block_reason = "No visible window";
+    } else if (view.cleanup_already_planned) {
+      view.cleanup_block_reason = "Already included in the plan";
+    } else {
+      view.cleanup_eligible = true;
+      view.cleanup_block_reason = "Ready to add";
+    }
     model.processes.push_back(std::move(view));
 
     if (!IsDeveloperWorkload(process.classification) &&
@@ -761,6 +902,47 @@ DashboardViewModel DashboardPresenter::Build(
   model.pages[static_cast<std::size_t>(DashboardPage::Settings)] =
       BuildSettings(config, startup_entries, startup_error);
   return model;
+}
+
+std::vector<ProcessSelection> ParseUnclosedProcessSelections(
+    const std::string& output) {
+  constexpr const char* kPrefix = "UNCLOSED_PROCESS ";
+  std::vector<ProcessSelection> selections;
+  std::istringstream stream(output);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (line.rfind(kPrefix, 0) != 0) continue;
+    const auto parse_number = [&line](const std::string& key,
+                                      std::uint64_t* value) {
+      const std::size_t key_position = line.find(key);
+      if (key_position == std::string::npos) return false;
+      const std::size_t start = key_position + key.size();
+      std::size_t end = start;
+      while (end < line.size() && line[end] >= '0' && line[end] <= '9') {
+        ++end;
+      }
+      if (end == start) return false;
+      try {
+        *value = std::stoull(line.substr(start, end - start));
+      } catch (...) {
+        return false;
+      }
+      return true;
+    };
+    std::uint64_t pid = 0;
+    std::uint64_t start_time = 0;
+    if (!parse_number("pid=", &pid) || !parse_number("start=", &start_time) ||
+        pid == 0 || pid > UINT32_MAX || start_time == 0) {
+      continue;
+    }
+    const ProcessSelection selection{
+        static_cast<std::uint32_t>(pid), start_time};
+    if (std::find(selections.begin(), selections.end(), selection) ==
+        selections.end()) {
+      selections.push_back(selection);
+    }
+  }
+  return selections;
 }
 
 }  // namespace workboost::gui

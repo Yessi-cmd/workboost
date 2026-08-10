@@ -59,6 +59,12 @@ struct CompletionReportSummary {
   bool rollback_complete{};
 };
 
+struct UnclosedProcessInfo {
+  std::uint32_t pid{};
+  std::uint64_t start_time_100ns{};
+  std::string name;
+};
+
 class SessionManager {
  public:
   explicit SessionManager(std::filesystem::path root_directory);
@@ -99,6 +105,12 @@ class SessionManager {
       const std::string& json, std::string* error = nullptr);
   static BenchmarkPoint MakeBenchmarkPoint(const SystemSnapshot& snapshot);
   static BenchmarkPoint MakeBenchmarkPoint(const SnapshotHistory& history);
+  // Finds graceful-close targets from a completed or recovering session that
+  // still have the exact PID + start-time identity in the given snapshot.
+  // PID reuse is deliberately ignored so a new process is never mislabeled
+  // as the unclosed target.
+  static std::vector<UnclosedProcessInfo> CollectUnclosedProcesses(
+      const OptimizationSession& session, const SystemSnapshot& snapshot);
 
  private:
   std::filesystem::path root_directory_;

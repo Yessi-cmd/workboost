@@ -462,6 +462,15 @@ Config Config::Defaults() {
     AddRule(&config, name, ProcessClass::CloudSync,
             ProtectionLevel::Optimizable);
   }
+  for (const char* name : {"yourphone.exe", "phoneexperiencehost.exe",
+                           "widgets.exe", "gamebar.exe",
+                           "gamebarftserver.exe",
+                           "xboxgamebarwidgets.exe", "systemsettings.exe",
+                           "calculatorapp.exe", "notepad.exe", "mspaint.exe",
+                           "snippingtool.exe", "microsoft.photos.exe"}) {
+    AddRule(&config, name, ProcessClass::VendorUtility,
+            ProtectionLevel::Optimizable);
+  }
   for (const char* name : {"searchindexer.exe"}) {
     AddRule(&config, name, ProcessClass::System,
             ProtectionLevel::SystemCritical);
@@ -529,6 +538,11 @@ bool Config::LoadDirectory(const std::filesystem::path& directory,
                   &coding_profile.always_protect_services);
     LoadStringSet(json, "allow_service_stop",
                   &coding_profile.allow_service_stop);
+    if (const auto value = ReadNumber(json, "graceful_close_batch_budget_ms")) {
+      coding_profile.graceful_close_batch_budget_ms =
+          static_cast<std::uint32_t>(
+              std::clamp(*value, 1000.0, 30000.0));
+    }
   }
 
   const auto rules_path = directory / "process_rules.json";

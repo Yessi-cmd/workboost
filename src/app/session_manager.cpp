@@ -1270,4 +1270,29 @@ std::optional<SessionState> SessionStateFromString(const std::string& value) {
   return std::nullopt;
 }
 
+std::vector<UnclosedProcessInfo> SessionManager::CollectUnclosedProcesses(
+    const OptimizationSession& session, const SystemSnapshot& snapshot) {
+  std::vector<UnclosedProcessInfo> unclosed;
+  for (const auto& record : session.actions) {
+    if (record.action.type != ActionType::GracefulCloseProcess ||
+        record.state != ActionState::Completed) {
+      continue;
+    }
+    const auto process = std::find_if(
+        snapshot.processes.begin(), snapshot.processes.end(),
+        [&record](const ProcessSnapshot& candidate) {
+          return candidate.pid == record.action.pid &&
+                 candidate.start_time_100ns ==
+                     record.action.expected_start_time_100ns;
+        });
+    if (process == snapshot.processes.end()) continue;
+    UnclosedProcessInfo info;
+    info.pid = process->pid;
+    info.start_time_100ns = process->start_time_100ns;
+    info.name = process->name;
+    unclosed.push_back(std::move(info));
+  }
+  return unclosed;
+}
+
 }  // namespace workboost

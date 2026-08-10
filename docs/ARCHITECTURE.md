@@ -54,7 +54,7 @@ Windows API 调用集中在 `src/platform/windows`。Core 层只依赖稳定数�
 
 `SystemCollector::Initialize` 建立 CPU、进程和 PDH 的第一组计数器基线；后续 `Sample` 使用区间差值计算速率。进程 CPU 会除以逻辑处理器数量，最终表示该进程占整机 CPU 的百分比。进程 PID 与启动时间一起保存，以区分 PID 复用。
 
-磁盘指标使用英文 PDH Counter 路径读取 `PhysicalDisk(*)` 的 Active Time、平均延迟、队列、吞吐和读写操作数。介质类型通过 `StorageDeviceSeekPenaltyProperty` 查询；查询失败时保留 `Unknown`，不会猜测介质类型。Collector 从 PDH 实例名提取已映射的盘符，并通过 `GetDiskFreeSpaceExW` 汇总卷总量与可用空间；映射或查询不完整时设置 `space_inventory_complete=false`，诊断层不会把不完整容量数据当作低空间证据。
+磁盘指标使用英文 PDH Counter 路径读取 `PhysicalDisk(*)` 的 Active Time、平均延迟、队列、吞吐和读写操作数。介质类型通过 `StorageDeviceSeekPenaltyProperty` 查询；查询失败时保留 `Unknown`，不会猜测介质类型。Collector 同时通过卷盘符的 `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` 映射所有已挂载本地卷，PDH 实例缺少某个卷时也会保留该物理盘记录；通过 `GetDiskFreeSpaceExW` 汇总卷总量与可用空间。映射或查询不完整时设置 `space_inventory_complete=false`，诊断层不会把不完整容量数据当作低空间证据。Dashboard 将同一物理盘的多个卷拆成独立盘符行，但 I/O 指标仍明确表示物理盘级数据。
 
 Defender、后台 I/O 和前台开发进程归因只统计 `process_inventory_complete=true` 的样本；`BackgroundIoImpact` 还要求同一样本的 TCP 清单完整，避免把清单缺失误解释为“确定未保护”。进程归因或磁盘实例必须覆盖至少半个窗口且不少于两个样本；覆盖不足时只保留与缺失证据无关的结论。
 诊断 JSON/TXT 与 Dashboard 同时显示总样本、Process 完整样本、TCP 完整样本和两者
@@ -84,7 +84,7 @@ ProtectionPolicy 的主要不变量：
   VersionControl 进程名在 `RuleFor` 边界重新施加固有类别和 Strong 下限，分层配置不能
   通过重分类绕过保护。
 
-OptimizationPlanner 只能创建强类型 Action。SafetyValidator 会重新查找快照中的 PID、校验启动时间、风险和目标优先级，再次调用 ProtectionPolicy。ActionExecutor 不接受任意命令文本。
+OptimizationPlanner 只能创建强类型 Action。Coding Mode 清理池在 GUI 内保存 `PID + process start time`，子进程边界只接受最多 64 个十进制 `--close-process PID:START_TIME_100NS` 参数，不接受进程名、路径或命令文本。基线窗口的 `WindowRuntimeContext` 取所有完整采样点的保护 PID 并集（远程调试端口连接、dumpcap 抓包），foreground 取最后一个快照；完整 Process/TCP 样本少于两个或覆盖不足窗口一半时，依赖保护清单的动作全部 fail-closed。CLI 在基线结束后从实时快照重新解析进程名和类别；OptimizationPlanner 与 SafetyValidator 都会重新查找 PID、校验启动时间、完整 Process/TCP 清单、可见后台窗口及 ProtectionPolicy。ActionExecutor 不接受任意命令文本。
 
 服务动作还必须通过 `ServiceProtectionPolicy`：只有显式配置的 Updater、CloudSync 或 VendorUtility 且最终保护级别为 Optimizable 时才可成为候选。System/Network/Security/RemoteAccess/PacketCapture/Device/Unknown、VPN/EDR 关键词、承载受保护远程连接或活动抓包 PID 的服务均被拒绝。进程或 TCP 清单不完整时，Planner 与 SafetyValidator 会拒绝进程降优先级和 Graceful Close；服务动作还由 Helper 再次采用 fail-closed 校验。
 
@@ -122,13 +122,19 @@ Planned 表示“系统调用可能尚未执行，也可能已执行但结果还
 
 `GracefulCloseProcess`（Low、一次性）：
 
-- 仅适用于 `allow_graceful_close` 显式列出的非保护后台应用。
+- 仅适用于 `allow_graceful_close` 显式列出，或用户在 Coding Mode 清理池中明确选择的非保护后台应用。
 - 目标必须具有可见顶层窗口，且不能是前台进程。
+- 手动选择仍不能绕过 System/Security、Unknown Strong、Always Protect、开发工具或受保护远程连接/抓包上下文。
 - 平台层校验 PID 与启动时间后，仅通过 `SendMessageTimeout(WM_CLOSE)` 请求关闭。
-- 所有顶层窗口共享单个动作超时预算；部分窗口投递超时且进程仍存活时返回
-  Uncertain，不能因另一个窗口成功就声称 Completed。
+- 进入模式时同一批次的所有关闭目标共享 `graceful_close_batch_budget_ms`
+  截止时间并在有界工作线程中并发投递；每个目标仍保留独立窗口超时上限，
+  部分窗口投递超时且进程仍存活时返回 Uncertain，不能因另一个窗口成功就
+  声称 Completed。
 - 应用可以显示未保存内容提示；WorkBoost 不调用 `TerminateProcess`。
 - 已持久化 Completed 的请求无需回滚；崩溃窗口中的请求进入 Uncertain。
+- `coding retry-close` 只接受十进制 `PID:START_TIME_100NS`，重新采样后走与
+  进入模式相同的校验、轻量会话持久化、批量执行、验证和报告链路；身份不匹配、
+  PID 复用、无可见窗口、前台或受保护状态都会拒绝。
 
 `StopServiceTemporary`（Medium、可逆）：
 

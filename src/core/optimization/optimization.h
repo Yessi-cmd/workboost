@@ -58,6 +58,16 @@ struct ExecutedAction {
   std::string result_message;
 };
 
+struct ProcessSelection {
+  std::uint32_t pid{};
+  std::uint64_t expected_start_time_100ns{};
+
+  [[nodiscard]] bool operator==(const ProcessSelection& other) const {
+    return pid == other.pid &&
+           expected_start_time_100ns == other.expected_start_time_100ns;
+  }
+};
+
 struct OptimizationPlan {
   std::vector<OptimizationAction> actions;
   std::vector<std::string> rejected;
@@ -66,9 +76,19 @@ struct OptimizationPlan {
 class OptimizationPlanner {
  public:
   explicit OptimizationPlanner(const Config& config) : config_(config) {}
-  [[nodiscard]] OptimizationPlan Create(const SystemSnapshot& snapshot) const;
+  [[nodiscard]] OptimizationPlan Create(
+      const SystemSnapshot& snapshot,
+      const std::vector<ProcessSelection>& explicit_close = {}) const;
+  [[nodiscard]] OptimizationPlan Create(
+      const SnapshotHistory& history,
+      const std::vector<ProcessSelection>& explicit_close = {}) const;
 
  private:
+  [[nodiscard]] OptimizationPlan CreateFrom(
+      const SystemSnapshot& snapshot, const RuntimeContext& context,
+      bool window_coverage_ok,
+      const std::vector<ProcessSelection>& explicit_close) const;
+
   const Config& config_;
 };
 
@@ -89,6 +109,13 @@ class ActionExecutor {
 
   ExecutedAction Execute(const OptimizationAction& action,
                          const SystemSnapshot& current_snapshot) const;
+  // Validates and sends WM_CLOSE for every action in one shared deadline.
+  // Results preserve input order; rejected actions stay Rejected and are not
+  // sent. Only GracefulCloseProcess actions are accepted.
+  std::vector<ExecutedAction> ExecuteGracefulCloseBatch(
+      const std::vector<OptimizationAction>& actions,
+      const SystemSnapshot& current_snapshot,
+      std::uint32_t shared_timeout_ms) const;
   bool Rollback(ExecutedAction* action) const;
 
  private:

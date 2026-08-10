@@ -254,6 +254,9 @@ class DashboardWindow {
       case WM_LBUTTONUP:
         HandleClick(lparam);
         return 0;
+      case WM_MOUSEWHEEL:
+        HandleMouseWheel(wparam, lparam);
+        return 0;
       case WM_KEYDOWN:
         HandleKeyDown(wparam);
         return 0;
@@ -276,24 +279,17 @@ class DashboardWindow {
         HandleTrayNotification(lparam);
         return 0;
       case WM_SYSCOMMAND:
-        if (wparam == SC_MINIMIZE) {
-          ShowWindow(window_, SW_HIDE);
-          AddTrayIcon();
+        if ((wparam & 0xFFF0) == SC_MINIMIZE) {
+          HideToTray();
           return 0;
         }
         return DefWindowProcW(window_, message, wparam, lparam);
       case WM_CLOSE:
-        if (coding_command_running_.load()) {
-          MessageBoxW(
-              window_,
-              windows::Utf8ToWide(Locale::Get(
-                  "A Coding Mode operation is still running. Complete the "
-                  "operation before closing WorkBoost."))
-                  .c_str(),
-              L"WorkBoost", MB_OK | MB_ICONINFORMATION);
-          return 0;
+        if (ResolveDashboardClose(DashboardCloseRequest::WindowClose,
+                                  coding_command_running_.load()) ==
+            DashboardCloseDisposition::HideToTray) {
+          HideToTray();
         }
-        DestroyWindow(window_);
         return 0;
       case WM_DESTROY:
         RemoveTrayIcon();
@@ -318,7 +314,10 @@ class DashboardWindow {
     RECT client{};
     GetClientRect(window_, &client);
     renderer_.Paint(dc, client, latest_model_, current_page_, hovered_,
-                    status_message_);
+                    status_message_, {},
+                    CodingModeViewOptions{cleanup_processes_,
+                                          cleanup_process_scroll_offset_,
+                                          cleanup_pool_scroll_offset_});
     EndPaint(window_, &paint);
   }
 
@@ -392,11 +391,13 @@ class DashboardWindow {
           confirmation
               << Locale::Format(
                      "Apply the reviewed Coding Mode plan?\n\n{0} planned "
-                     "action(s)\n{1} protected workload(s)\n\nA 10-second "
+                     "action(s)\n{1} cleanup process(es)\n{2} protected "
+                     "workload(s)\n\nA 10-second "
                      "baseline is captured first. All system changes still "
                      "pass ProtectionPolicy and SafetyValidator.",
                      {std::to_string(
                           latest_model_->coding_mode.planned_actions),
+                      std::to_string(cleanup_processes_.size()),
                       std::to_string(
                           latest_model_->coding_mode.protected_workloads)});
           const int answer = MessageBoxW(
@@ -412,9 +413,93 @@ class DashboardWindow {
           StartCodingCommand(CodingModeCommand::Restore);
         }
         break;
+      case DashboardUiAction::ToggleCleanupProcess:
+        ToggleCleanupProcess(command->value);
+        break;
+      case DashboardUiAction::FocusProcessSearch:
+      case DashboardUiAction::ProcessFilterAll:
+      case DashboardUiAction::ProcessFilterHighImpact:
+      case DashboardUiAction::ProcessFilterProtected:
+      case DashboardUiAction::ProcessSortCpu:
+      case DashboardUiAction::ProcessSortMemory:
+      case DashboardUiAction::ProcessSortIo:
+      case DashboardUiAction::ProcessSortImpact:
+      case DashboardUiAction::SelectProcess:
+        break;
       case DashboardUiAction::None: break;
     }
     InvalidateRect(window_, nullptr, FALSE);
+  }
+
+  void HandleMouseWheel(WPARAM wparam, LPARAM lparam) {
+    if (current_page_ != DashboardPage::CodingMode || !latest_model_ ||
+        latest_model_->coding_mode.active ||
+        latest_model_->coding_mode.safe_mode ||
+        latest_model_->coding_mode.operation_in_progress) {
+      return;
+    }
+    const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+    POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    ScreenToClient(window_, &point);
+    RECT client{};
+    GetClientRect(window_, &client);
+    const bool over_cleanup_pool = point.x > client.right * 7 / 10;
+    std::size_t* offset = over_cleanup_pool
+                              ? &cleanup_pool_scroll_offset_
+                              : &cleanup_process_scroll_offset_;
+    const std::size_t item_count = over_cleanup_pool
+                                       ? cleanup_processes_.size()
+                                       : latest_model_->processes.size();
+    if (delta > 0) {
+      *offset = *offset > 3 ? *offset - 3 : 0;
+    } else if (delta < 0) {
+      *offset = std::min(*offset + 3,
+                         item_count == 0 ? std::size_t{0} : item_count - 1);
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+  }
+
+  void ToggleCleanupProcess(std::uint32_t pid) {
+    if (!latest_model_ || latest_model_->coding_mode.active ||
+        latest_model_->coding_mode.safe_mode ||
+        latest_model_->coding_mode.operation_in_progress) {
+      return;
+    }
+    const auto process = std::find_if(
+        latest_model_->processes.begin(), latest_model_->processes.end(),
+        [pid](const ProcessViewModel& candidate) {
+          return candidate.pid == pid;
+        });
+    if (process == latest_model_->processes.end()) {
+      status_message_ = Locale::Get("Process is no longer available.");
+      return;
+    }
+    const ProcessSelection selection{process->pid,
+                                     process->start_time_100ns};
+    const auto selected = std::find(cleanup_processes_.begin(),
+                                    cleanup_processes_.end(), selection);
+    if (selected != cleanup_processes_.end()) {
+      cleanup_processes_.erase(selected);
+      cleanup_pool_scroll_offset_ = std::min(
+          cleanup_pool_scroll_offset_,
+          cleanup_processes_.empty() ? std::size_t{0}
+                                     : cleanup_processes_.size() - 1);
+      status_message_ = Locale::Get("Removed from the cleanup pool.");
+      return;
+    }
+    if (!process->cleanup_eligible) {
+      status_message_ = Locale::Get(process->cleanup_block_reason);
+      return;
+    }
+    if (cleanup_processes_.size() >= 64) {
+      status_message_ = Locale::Get("Cleanup pool is full.");
+      return;
+    }
+    cleanup_processes_.push_back(selection);
+    cleanup_pool_scroll_offset_ = cleanup_processes_.size() > 1
+                                      ? cleanup_processes_.size() - 1
+                                      : 0;
+    status_message_ = Locale::Get("Added to the cleanup pool.");
   }
 
   void HandleKeyDown(WPARAM key) {
@@ -445,10 +530,39 @@ class DashboardWindow {
     }
     if (model) {
       ApplyCodingOperationState(&*model);
+      ReconcileCleanupProcesses(*model);
       latest_model_ = std::move(model);
       if (!coding_command_running_.load()) status_message_.clear();
       InvalidateRect(window_, nullptr, FALSE);
     }
+  }
+
+  void ReconcileCleanupProcesses(const DashboardViewModel& model) {
+    cleanup_processes_.erase(
+        std::remove_if(
+            cleanup_processes_.begin(), cleanup_processes_.end(),
+            [&model](const ProcessSelection& selection) {
+              const auto process = std::find_if(
+                  model.processes.begin(), model.processes.end(),
+                  [&selection](const ProcessViewModel& candidate) {
+                    return candidate.pid == selection.pid &&
+                           candidate.start_time_100ns ==
+                               selection.expected_start_time_100ns;
+                  });
+              return process == model.processes.end() ||
+                     !process->cleanup_eligible;
+            }),
+        cleanup_processes_.end());
+    if (model.processes.empty()) {
+      cleanup_process_scroll_offset_ = 0;
+    } else {
+      cleanup_process_scroll_offset_ = std::min(
+          cleanup_process_scroll_offset_, model.processes.size() - 1);
+    }
+    cleanup_pool_scroll_offset_ = std::min(
+        cleanup_pool_scroll_offset_,
+        cleanup_processes_.empty() ? std::size_t{0}
+                                   : cleanup_processes_.size() - 1);
   }
 
   void ApplyCodingOperationState(DashboardViewModel* model) const {
@@ -457,7 +571,9 @@ class DashboardWindow {
     model->coding_mode.operation_status = coding_operation_status_;
   }
 
-  void StartCodingCommand(CodingModeCommand command) {
+  void StartCodingCommand(
+      CodingModeCommand command,
+      const std::vector<ProcessSelection>& explicit_selections = {}) {
     if (coding_command_running_.exchange(true)) return;
     if (coding_worker_.joinable()) coding_worker_.join();
 
@@ -476,16 +592,29 @@ class DashboardWindow {
         coding_operation_status_ = Locale::Get(
             "Restoring the unfinished session and verifying system state...");
         break;
+      case CodingModeCommand::RetryClose:
+        coding_operation_status_ = Locale::Get(
+            "Retrying graceful close for unclosed processes...");
+        break;
     }
     status_message_ = coding_operation_status_;
     if (latest_model_) ApplyCodingOperationState(&*latest_model_);
     InvalidateRect(window_, nullptr, FALSE);
 
+    std::vector<ProcessSelection> cleanup_processes;
+    if (command == CodingModeCommand::Enter) {
+      cleanup_processes = explicit_selections.empty()
+                              ? cleanup_processes_
+                              : explicit_selections;
+    } else if (command == CodingModeCommand::RetryClose) {
+      cleanup_processes = explicit_selections;
+    }
     try {
-      coding_worker_ = std::thread([this, command] {
+      coding_worker_ = std::thread([this, command, cleanup_processes] {
         CodingModeCommandResult result;
         try {
-          result = CodingModeCommandClient::Execute(command);
+          result = CodingModeCommandClient::Execute(command, 10,
+                                                    cleanup_processes);
         } catch (const std::exception& error) {
           result.error.code = ERROR_UNHANDLED_EXCEPTION;
           result.error.context = "Execute Coding Mode command";
@@ -528,28 +657,62 @@ class DashboardWindow {
 
     if (result->Succeeded()) {
       const bool entered = active_coding_command_ == CodingModeCommand::Enter;
-      status_message_ = entered
-                            ? Locale::Get("Coding Mode is active.")
-                            : Locale::Get("System state was restored "
-                                          "successfully.");
+      if (entered) {
+        cleanup_processes_.clear();
+        cleanup_pool_scroll_offset_ = 0;
+      }
+      if (entered) {
+        status_message_ = Locale::Get("Coding Mode is active.");
+      } else if (active_coding_command_ == CodingModeCommand::RetryClose) {
+        status_message_ = Locale::Get("Cleanup retry completed.");
+      } else {
+        status_message_ =
+            Locale::Get("System state was restored successfully.");
+      }
       current_page_ = entered ? DashboardPage::CodingMode
                               : DashboardPage::Dashboard;
-      MessageBoxW(window_,
-                  windows::Utf8ToWide(
-                      entered
-                          ? Locale::Get(
-                                "Coding Mode is active. WorkBoost recorded "
-                                "every applied action for deterministic "
-                                "rollback.")
-                          : Locale::Get(
-                                "The reversible session was restored and "
-                                "verified."))
-                      .c_str(),
-                  windows::Utf8ToWide(
-                      Locale::Get(entered ? "Coding Mode active"
-                                          : "Recovery complete"))
-                      .c_str(),
-                  MB_OK | MB_ICONINFORMATION);
+      if (entered) {
+        MessageBoxW(
+            window_,
+            windows::Utf8ToWide(Locale::Get(
+                "Coding Mode is active. WorkBoost recorded every applied "
+                "action for deterministic rollback."))
+                .c_str(),
+            windows::Utf8ToWide(Locale::Get("Coding Mode active")).c_str(),
+            MB_OK | MB_ICONINFORMATION);
+      } else if (active_coding_command_ == CodingModeCommand::Exit) {
+        const auto unclosed =
+            ParseUnclosedProcessSelections(result->output);
+        if (!unclosed.empty()) {
+          PromptRetryClose(unclosed);
+        } else {
+          MessageBoxW(
+              window_,
+              windows::Utf8ToWide(Locale::Get(
+                  "The reversible session was restored and verified."))
+                  .c_str(),
+              windows::Utf8ToWide(Locale::Get("Recovery complete")).c_str(),
+              MB_OK | MB_ICONINFORMATION);
+        }
+      } else if (active_coding_command_ == CodingModeCommand::RetryClose) {
+        MessageBoxW(
+            window_,
+            windows::Utf8ToWide(Locale::Get(
+                "Cleanup retry completed. Revalidation, session "
+                "persistence, and reporting used the standard Coding Mode "
+                "path."))
+                .c_str(),
+            windows::Utf8ToWide(Locale::Get("Cleanup Retry")).c_str(),
+            MB_OK | MB_ICONINFORMATION);
+      } else {
+        MessageBoxW(
+            window_,
+            windows::Utf8ToWide(Locale::Get(
+                "The reversible session was restored and verified."))
+                .c_str(),
+            windows::Utf8ToWide(Locale::Get("Recovery complete")).c_str(),
+            MB_OK | MB_ICONINFORMATION);
+      }
     } else {
       std::ostringstream details;
       details << Locale::Get("WorkBoost did not complete the requested "
@@ -583,6 +746,39 @@ class DashboardWindow {
     InvalidateRect(window_, nullptr, FALSE);
   }
 
+  void PromptRetryClose(const std::vector<ProcessSelection>& unclosed) {
+    std::string details;
+    for (const auto& selection : unclosed) {
+      std::string name = "PID " + std::to_string(selection.pid);
+      if (latest_model_) {
+        const auto process = std::find_if(
+            latest_model_->processes.begin(),
+            latest_model_->processes.end(),
+            [&selection](const ProcessViewModel& candidate) {
+              return candidate.pid == selection.pid &&
+                     candidate.start_time_100ns ==
+                         selection.expected_start_time_100ns;
+            });
+        if (process != latest_model_->processes.end()) name = process->name;
+      }
+      details += "  " + name + " (PID " + std::to_string(selection.pid) +
+                 ")\r\n";
+    }
+    const std::string message = Locale::Format(
+        "{0} cleanup process(es) are still running after exit:\r\n{1}\r\n"
+        "Retry graceful close now? Choosing No keeps them running.",
+        {std::to_string(unclosed.size()), details});
+    const int answer = MessageBoxW(
+        window_, windows::Utf8ToWide(message).c_str(),
+        windows::Utf8ToWide(Locale::Get("Retry Cleanup")).c_str(),
+        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
+    if (answer == IDYES) {
+      StartCodingCommand(CodingModeCommand::RetryClose, unclosed);
+    } else {
+      status_message_ = Locale::Get("Cleanup processes kept running.");
+    }
+  }
+
   void PostModel(DashboardViewModel model) {
     if (stop_requested_.load()) return;
     {
@@ -613,8 +809,8 @@ class DashboardWindow {
     if (worker_.joinable()) worker_.join();
   }
 
-  void AddTrayIcon() {
-    if (tray_icon_added_) return;
+  bool AddTrayIcon() {
+    if (tray_icon_added_) return true;
     tray_icon_ = {};
     tray_icon_.cbSize = sizeof(tray_icon_);
     tray_icon_.hWnd = window_;
@@ -627,19 +823,25 @@ class DashboardWindow {
     lstrcpynW(tray_icon_.szTip, L"WorkBoost", ARRAYSIZE(tray_icon_.szTip));
     tray_icon_.uVersion = NOTIFYICON_VERSION_4;
     tray_icon_added_ = Shell_NotifyIconW(NIM_ADD, &tray_icon_) != FALSE;
-    if (!tray_icon_added_) return;
+    if (!tray_icon_added_) return false;
     Shell_NotifyIconW(NIM_SETVERSION, &tray_icon_);
-    if (tray_tip_shown_) return;
+    if (tray_tip_shown_) return true;
     tray_tip_shown_ = true;
     tray_icon_.uFlags = NIF_INFO;
     lstrcpynW(tray_icon_.szInfoTitle, L"WorkBoost",
               ARRAYSIZE(tray_icon_.szInfoTitle));
     const std::wstring tip = windows::Utf8ToWide(Locale::Get(
-        "WorkBoost is still running. Double-click the tray icon to open the "
+        "WorkBoost is still running. Click the tray icon to open the "
         "dashboard."));
     lstrcpynW(tray_icon_.szInfo, tip.c_str(), ARRAYSIZE(tray_icon_.szInfo));
     tray_icon_.dwInfoFlags = NIIF_INFO;
     Shell_NotifyIconW(NIM_MODIFY, &tray_icon_);
+    return true;
+  }
+
+  void HideToTray() {
+    // Keep the dashboard visible if Explorer rejects the tray icon.
+    if (AddTrayIcon()) ShowWindow(window_, SW_HIDE);
   }
 
   void RemoveTrayIcon() {
@@ -669,13 +871,17 @@ class DashboardWindow {
     POINT cursor{};
     GetCursorPos(&cursor);
     const UINT command = static_cast<UINT>(TrackPopupMenu(
-        tray_menu_, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN, cursor.x,
-        cursor.y, 0, window_, nullptr));
+        tray_menu_,
+        TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+        cursor.x, cursor.y, 0, window_, nullptr));
     PostMessageW(window_, WM_NULL, 0, 0);
     if (command == kTrayMenuOpen) {
       RestoreFromTray();
     } else if (command == kTrayMenuExit) {
-      if (coding_command_running_.load()) {
+      const auto disposition = ResolveDashboardClose(
+          DashboardCloseRequest::ExplicitExit,
+          coding_command_running_.load());
+      if (disposition == DashboardCloseDisposition::KeepOpen) {
         MessageBoxW(
             window_,
             windows::Utf8ToWide(Locale::Get(
@@ -683,18 +889,28 @@ class DashboardWindow {
                 "operation before closing WorkBoost."))
                 .c_str(),
             L"WorkBoost", MB_OK | MB_ICONINFORMATION);
-      } else {
+      } else if (disposition == DashboardCloseDisposition::Exit) {
         DestroyWindow(window_);
       }
     }
   }
 
   void HandleTrayNotification(LPARAM lparam) {
-    switch (static_cast<UINT>(lparam)) {
+    const auto notification = DecodeDashboardTrayNotification(
+        static_cast<std::uintptr_t>(lparam),
+        tray_icon_.uVersion == NOTIFYICON_VERSION_4);
+    if (notification.icon_id != 0 && notification.icon_id != kTrayIconId) {
+      return;
+    }
+    switch (notification.event_code) {
+      case WM_LBUTTONUP:
       case WM_LBUTTONDBLCLK:
+      case NIN_SELECT:
+      case NIN_KEYSELECT:
         RestoreFromTray();
         break;
       case WM_RBUTTONUP:
+      case WM_CONTEXTMENU:
         ShowTrayMenu();
         break;
       default:
@@ -866,6 +1082,9 @@ class DashboardWindow {
   std::optional<CodingModeCommandResult> pending_coding_result_;
   CodingModeCommand active_coding_command_{CodingModeCommand::Enter};
   std::string coding_operation_status_;
+  std::vector<ProcessSelection> cleanup_processes_;
+  std::size_t cleanup_process_scroll_offset_{};
+  std::size_t cleanup_pool_scroll_offset_{};
   NOTIFYICONDATAW tray_icon_{};
   bool tray_icon_added_{};
   bool tray_tip_shown_{};

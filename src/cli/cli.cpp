@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -40,6 +41,7 @@ namespace {
 
 constexpr double kMiB = 1024.0 * 1024.0;
 constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+constexpr std::size_t kMaximumCleanupProcesses = 64;
 
 struct CliOptions {
   bool json{};
@@ -56,6 +58,7 @@ struct CliOptions {
   bool benchmark_label_specified{};
   std::optional<std::filesystem::path> config_directory;
   std::optional<std::filesystem::path> output_path;
+  std::vector<ProcessSelection> cleanup_processes;
 };
 
 void PrintUsage() {
@@ -80,8 +83,11 @@ void PrintUsage() {
          " [--output FILE] [--json]\n"
       << "  workboost profile show coding [--json]\n"
       << "  workboost coding enter [--dry-run] [--confirm-service-actions]"
-         " [--baseline-duration 10..600]\n"
+         " [--baseline-duration 10..600]"
+         " [--close-process PID:START_TIME_100NS ...]\n"
       << "  workboost coding exit\n"
+      << "  workboost coding retry-close --close-process "
+         "PID:START_TIME_100NS ...\n"
       << "  workboost recovery <status|restore|acknowledge>\n\n"
       << "Global option: --config-dir DIRECTORY\n";
 }
@@ -92,6 +98,41 @@ bool ParsePositiveInt(const std::string& value, int* output) {
     const int parsed = std::stoi(value, &consumed);
     if (consumed != value.size() || parsed < 0) return false;
     *output = parsed;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool ParseProcessSelection(const std::string& value,
+                           ProcessSelection* output) {
+  const std::size_t separator = value.find(':');
+  if (separator == std::string::npos || separator == 0 ||
+      separator + 1 >= value.size() ||
+      value.find(':', separator + 1) != std::string::npos) {
+    return false;
+  }
+  if (!std::all_of(value.begin(), value.end(), [](char character) {
+        return character == ':' || (character >= '0' && character <= '9');
+      }) ||
+      value[separator] != ':') {
+    return false;
+  }
+  try {
+    std::size_t pid_consumed = 0;
+    std::size_t time_consumed = 0;
+    const auto pid = std::stoull(value.substr(0, separator), &pid_consumed);
+    const std::string start_time = value.substr(separator + 1);
+    const auto parsed_start_time =
+        std::stoull(start_time, &time_consumed);
+    if (pid_consumed != separator || time_consumed != start_time.size() ||
+        pid == 0 ||
+        pid > std::numeric_limits<std::uint32_t>::max() ||
+        parsed_start_time == 0) {
+      return false;
+    }
+    output->pid = static_cast<std::uint32_t>(pid);
+    output->expected_start_time_100ns = parsed_start_time;
     return true;
   } catch (...) {
     return false;
@@ -111,6 +152,27 @@ bool ParseOptions(const std::vector<std::string>& input,
       options->dry_run = true;
     } else if (value == "--confirm-service-actions") {
       options->confirm_service_actions = true;
+    } else if (value == "--close-process") {
+      if (++i >= input.size()) {
+        *error = value + " requires PID:START_TIME_100NS";
+        return false;
+      }
+      ProcessSelection selection;
+      if (!ParseProcessSelection(input[i], &selection)) {
+        *error = value + " requires PID:START_TIME_100NS using positive "
+                         "decimal integers";
+        return false;
+      }
+      if (std::find(options->cleanup_processes.begin(),
+                    options->cleanup_processes.end(),
+                    selection) == options->cleanup_processes.end()) {
+        if (options->cleanup_processes.size() >=
+            kMaximumCleanupProcesses) {
+          *error = "at most 64 --close-process selections are allowed";
+          return false;
+        }
+        options->cleanup_processes.push_back(selection);
+      }
     } else if (value == "--limit" || value == "--duration" ||
                value == "--interval" ||
                value == "--runs" || value == "--label" ||
@@ -882,7 +944,10 @@ void PrintProfile(const Config& config, bool json) {
     PrintJsonStringSet("always_protect_services",
                        config.coding_profile.always_protect_services, true);
     PrintJsonStringSet("allow_service_stop",
-                       config.coding_profile.allow_service_stop, false);
+                       config.coding_profile.allow_service_stop, true);
+    std::cout << "  \"graceful_close_batch_budget_ms\": "
+              << config.coding_profile.graceful_close_batch_budget_ms
+              << '\n';
     std::cout << "}\n";
     return;
   }
@@ -904,7 +969,10 @@ void PrintProfile(const Config& config, bool json) {
             << config.coding_profile.always_protect_services.size()
             << " rule(s)\n"
             << "Temporary service stop allowed: "
-            << config.coding_profile.allow_service_stop.size() << " rule(s)\n";
+            << config.coding_profile.allow_service_stop.size() << " rule(s)\n"
+            << "Graceful close shared budget: "
+            << config.coding_profile.graceful_close_batch_budget_ms
+            << " ms\n";
 }
 
 int RestoreSession(const Config& config, SessionManager* manager,
@@ -1006,6 +1074,8 @@ int RestoreSession(const Config& config, SessionManager* manager,
   } else {
     report_history.Add(*verification);
   }
+  const auto unclosed =
+      SessionManager::CollectUnclosedProcesses(*session, *verification);
   if (!report_evidence_captured) {
     report_diagnoses = DiagnosisEngine(config).Evaluate(report_history);
   }
@@ -1022,6 +1092,21 @@ int RestoreSession(const Config& config, SessionManager* manager,
   std::cout << (recovery_command ? "Recovery completed.\n"
                                  : "Coding Mode exited.\n")
             << "Report: " << report.string() << '\n';
+  if (!unclosed.empty()) {
+    for (const auto& process : unclosed) {
+      std::cout << "UNCLOSED_PROCESS pid=" << process.pid
+                << " start=" << process.start_time_100ns
+                << " name=" << process.name << '\n';
+    }
+    std::cout << unclosed.size()
+              << " cleanup process(es) are still running after exit. Retry "
+                 "with:\n  workboost coding retry-close";
+    for (const auto& process : unclosed) {
+      std::cout << " --close-process " << process.pid << ':'
+                << process.start_time_100ns;
+    }
+    std::cout << '\n';
+  }
   return 0;
 }
 
@@ -1127,14 +1212,27 @@ int EnterCodingMode(const Config& config, const CliOptions& options,
     std::cerr << "Baseline failed: " << error << '\n';
     return 1;
   }
-  const SystemSnapshot& baseline = *history->Latest();
-  SystemSnapshot planning_snapshot = baseline;
-  if (!AttachConfiguredServices(config, &planning_snapshot, &error)) {
+  const auto window_context =
+      BuildWindowRuntimeContext(*history, config.remote_debug_ports);
+  std::cout << "Baseline window: " << window_context.total_samples
+            << " sample(s), " << window_context.complete_process_samples
+            << " complete process sample(s), "
+            << window_context.complete_tcp_samples
+            << " complete TCP sample(s).\n";
+  const auto& window_snapshots = history->Snapshots();
+  SnapshotHistory planning_history(history->Size());
+  for (std::size_t index = 0; index + 1 < window_snapshots.size(); ++index) {
+    planning_history.Add(window_snapshots[index]);
+  }
+  SystemSnapshot planning_latest = window_snapshots.back();
+  if (!AttachConfiguredServices(config, &planning_latest, &error)) {
     std::cerr << "Cannot build service protection inventory: " << error
               << '\n';
     return 1;
   }
-  auto plan = OptimizationPlanner(config).Create(planning_snapshot);
+  planning_history.Add(std::move(planning_latest));
+  auto plan = OptimizationPlanner(config).Create(
+      planning_history, options.cleanup_processes);
   const std::size_t safe_actions = static_cast<std::size_t>(std::count_if(
       plan.actions.begin(), plan.actions.end(), [](const auto& action) {
         return action.risk == ActionRisk::Safe;
@@ -1182,69 +1280,18 @@ int EnterCodingMode(const Config& config, const CliOptions& options,
   }
   Logger::Instance().Write(LogLevel::Info, LogEvent::CodingModeStarted);
   ActionExecutor executor(config);
-  for (std::size_t action_index = 0; action_index < plan.actions.size();
-       ++action_index) {
-    const auto& action = plan.actions[action_index];
-    if (action_index != 0) {
-      execution_snapshot = CaptureActionState(config, &error);
-      if (!execution_snapshot) {
-        session.state = SessionState::SafeMode;
-        std::string persist_error;
-        manager->Save(session, &persist_error);
-        std::cerr << "Safe Mode: cannot refresh protection state before "
-                     "the next action: "
-                  << error << '\n';
-        return 2;
-      }
-    }
-    ExecutedAction record;
-    record.action = action;
-    record.state = ActionState::Planned;
-    // Reversible actions persist their restore value before the system call.
-    // A planned one-shot action is instead recovered as Uncertain and is never
-    // replayed automatically.
-    if (action.type == ActionType::SetPriorityClass) {
-      record.original_priority = action.source_priority;
-      for (const auto& process : execution_snapshot->processes) {
-        if (process.pid == action.pid &&
-            process.start_time_100ns == action.expected_start_time_100ns) {
-          record.original_priority = process.priority_class;
-          break;
-        }
-      }
-    } else if (action.type == ActionType::StopServiceTemporary) {
-      record.original_service_state = action.source_service_state;
-    }
-    std::string preflight_reason;
-    if (!SafetyValidator(config).Validate(action, *execution_snapshot,
-                                          &preflight_reason)) {
-      record.state = ActionState::Rejected;
-      record.error_code = ERROR_ACCESS_DISABLED_BY_POLICY;
-      record.error_message = preflight_reason;
-      Logger::Instance().Write(LogLevel::Warn, LogEvent::ActionRejected,
-                               record.error_code);
-      session.actions.push_back(record);
-      if (!manager->Save(session, &error)) {
-        std::cerr << "Safe Mode: cannot persist rejected action: " << error
-                  << '\n';
-        return 2;
-      }
-      std::cerr << "  " << record.action.id << ": " << record.error_message
-                << '\n';
-      continue;
-    }
-    session.actions.push_back(record);
-    if (!manager->Save(session, &error)) {
-      std::cerr << "Safe Mode: cannot persist planned action: " << error << '\n';
-      return 2;
-    }
-    session.actions.back() = executor.Execute(action, *execution_snapshot);
-    if (!manager->Save(session, &error)) {
-      std::cerr << "Safe Mode: action state persistence failed: " << error
-                << '\n';
-      return 2;
-    }
-    const auto& result = session.actions.back();
+  const auto refresh_execution_snapshot = [&]() -> bool {
+    execution_snapshot = CaptureActionState(config, &error);
+    if (execution_snapshot) return true;
+    session.state = SessionState::SafeMode;
+    std::string persist_error;
+    manager->Save(session, &persist_error);
+    std::cerr << "Safe Mode: cannot refresh protection state before "
+                 "the next action: "
+              << error << '\n';
+    return false;
+  };
+  const auto persist_and_report = [&](const ExecutedAction& result) -> int {
     if (!result.result_message.empty()) {
       std::cout << "  " << result.action.id << ": " << result.result_message
                 << '\n';
@@ -1261,15 +1308,139 @@ int EnterCodingMode(const Config& config, const CliOptions& options,
                                                 : LogEvent::ActionFailed,
           static_cast<std::uint32_t>(result.error_code));
     }
-    if (result.state == ActionState::Uncertain) {
-      session.state = SessionState::SafeMode;
-      std::string persist_error;
-      if (!manager->Save(session, &persist_error)) {
-        std::cerr << "Safe Mode persistence failed: " << persist_error << '\n';
+    if (result.state != ActionState::Uncertain) return 0;
+    session.state = SessionState::SafeMode;
+    std::string persist_error;
+    if (!manager->Save(session, &persist_error)) {
+      std::cerr << "Safe Mode persistence failed: " << persist_error << '\n';
+    }
+    std::cerr << "Safe Mode: an action outcome is uncertain; no further "
+                 "actions will run.\n";
+    return 2;
+  };
+  std::size_t action_index = 0;
+  bool first_action = true;
+  while (action_index < plan.actions.size()) {
+    if (plan.actions[action_index].type !=
+        ActionType::GracefulCloseProcess) {
+      if (!first_action && !refresh_execution_snapshot()) return 2;
+      first_action = false;
+      const auto& action = plan.actions[action_index];
+      ++action_index;
+      ExecutedAction record;
+      record.action = action;
+      record.state = ActionState::Planned;
+      // Reversible actions persist their restore value before the system
+      // call. A planned one-shot action is instead recovered as Uncertain
+      // and is never replayed automatically.
+      if (action.type == ActionType::SetPriorityClass) {
+        record.original_priority = action.source_priority;
+        for (const auto& process : execution_snapshot->processes) {
+          if (process.pid == action.pid &&
+              process.start_time_100ns == action.expected_start_time_100ns) {
+            record.original_priority = process.priority_class;
+            break;
+          }
+        }
+      } else if (action.type == ActionType::StopServiceTemporary) {
+        record.original_service_state = action.source_service_state;
       }
-      std::cerr << "Safe Mode: an action outcome is uncertain; no further "
-                   "actions will run.\n";
-      return 2;
+      std::string preflight_reason;
+      if (!SafetyValidator(config).Validate(action, *execution_snapshot,
+                                            &preflight_reason)) {
+        record.state = ActionState::Rejected;
+        record.error_code = ERROR_ACCESS_DISABLED_BY_POLICY;
+        record.error_message = preflight_reason;
+        Logger::Instance().Write(LogLevel::Warn, LogEvent::ActionRejected,
+                                 record.error_code);
+        session.actions.push_back(record);
+        if (!manager->Save(session, &error)) {
+          std::cerr << "Safe Mode: cannot persist rejected action: " << error
+                    << '\n';
+          return 2;
+        }
+        std::cerr << "  " << record.action.id << ": " << record.error_message
+                  << '\n';
+        continue;
+      }
+      session.actions.push_back(record);
+      if (!manager->Save(session, &error)) {
+        std::cerr << "Safe Mode: cannot persist planned action: " << error
+                  << '\n';
+        return 2;
+      }
+      session.actions.back() = executor.Execute(action, *execution_snapshot);
+      if (!manager->Save(session, &error)) {
+        std::cerr << "Safe Mode: action state persistence failed: " << error
+                  << '\n';
+        return 2;
+      }
+      const auto result_status =
+          persist_and_report(session.actions.back());
+      if (result_status != 0) return result_status;
+      continue;
+    }
+
+    // Contiguous graceful-close actions share one deadline and are validated
+    // against a single freshly captured protection snapshot.
+    std::vector<OptimizationAction> close_run;
+    while (action_index < plan.actions.size() &&
+           plan.actions[action_index].type ==
+               ActionType::GracefulCloseProcess) {
+      close_run.push_back(plan.actions[action_index]);
+      ++action_index;
+    }
+    if (!first_action && !refresh_execution_snapshot()) return 2;
+    first_action = false;
+    std::vector<std::size_t> planned_indices;
+    std::vector<OptimizationAction> validated_close_run;
+    for (const auto& action : close_run) {
+      ExecutedAction record;
+      record.action = action;
+      record.state = ActionState::Planned;
+      std::string preflight_reason;
+      if (!SafetyValidator(config).Validate(action, *execution_snapshot,
+                                            &preflight_reason)) {
+        record.state = ActionState::Rejected;
+        record.error_code = ERROR_ACCESS_DISABLED_BY_POLICY;
+        record.error_message = preflight_reason;
+        Logger::Instance().Write(LogLevel::Warn, LogEvent::ActionRejected,
+                                 record.error_code);
+        session.actions.push_back(record);
+        if (!manager->Save(session, &error)) {
+          std::cerr << "Safe Mode: cannot persist rejected action: " << error
+                    << '\n';
+          return 2;
+        }
+        std::cerr << "  " << record.action.id << ": " << record.error_message
+                  << '\n';
+        continue;
+      }
+      planned_indices.push_back(session.actions.size());
+      session.actions.push_back(record);
+      if (!manager->Save(session, &error)) {
+        std::cerr << "Safe Mode: cannot persist planned action: " << error
+                  << '\n';
+        return 2;
+      }
+      validated_close_run.push_back(action);
+    }
+    if (validated_close_run.empty()) continue;
+    const auto batch_results = executor.ExecuteGracefulCloseBatch(
+        validated_close_run, *execution_snapshot,
+        config.coding_profile.graceful_close_batch_budget_ms);
+    for (std::size_t batch_index = 0;
+         batch_index < batch_results.size(); ++batch_index) {
+      session.actions[planned_indices[batch_index]] =
+          batch_results[batch_index];
+      if (!manager->Save(session, &error)) {
+        std::cerr << "Safe Mode: action state persistence failed: " << error
+                  << '\n';
+        return 2;
+      }
+      const auto result_status =
+          persist_and_report(session.actions[planned_indices[batch_index]]);
+      if (result_status != 0) return result_status;
     }
   }
   std::size_t applied = 0;
@@ -1283,6 +1454,150 @@ int EnterCodingMode(const Config& config, const CliOptions& options,
             << " one-shot action(s) completed.\n"
             << "Exit with: workboost coding exit\n";
   return 0;
+}
+
+int RetryCloseProcesses(const Config& config, const CliOptions& options,
+                        SessionManager* manager) {
+  if (options.cleanup_processes.empty()) {
+    std::cerr << "retry-close requires at least one --close-process "
+                 "PID:START_TIME_100NS.\n";
+    return 64;
+  }
+  if (manager->HasActiveSession()) {
+    std::cerr << "An unfinished Coding Mode session exists; exit or restore "
+                 "it before retrying cleanup.\n";
+    return 2;
+  }
+  std::string error;
+  auto execution_snapshot = CaptureActionState(config, &error);
+  if (!execution_snapshot) {
+    std::cerr << "Cannot refresh protection state before retry: " << error
+              << '\n';
+    return 1;
+  }
+  SnapshotHistory baseline(1);
+  baseline.Add(*execution_snapshot);
+  auto plan = OptimizationPlanner(config).Create(baseline,
+                                                 options.cleanup_processes);
+  if (plan.actions.empty()) {
+    for (const auto& rejected : plan.rejected) {
+      std::cerr << "  rejected: " << rejected << '\n';
+    }
+    std::cerr << "No valid retry target; nothing was executed.\n";
+    return 1;
+  }
+
+  OptimizationSession session = manager->Create(baseline);
+  if (!manager->Save(session, &error)) {
+    std::cerr << "Cannot persist retry session: " << error << '\n';
+    return 2;
+  }
+  Logger::Instance().Write(LogLevel::Info, LogEvent::CodingModeStarted);
+  ActionExecutor executor(config);
+  std::vector<std::size_t> planned_indices;
+  std::vector<OptimizationAction> validated;
+  for (const auto& action : plan.actions) {
+    ExecutedAction record;
+    record.action = action;
+    record.state = ActionState::Planned;
+    std::string preflight_reason;
+    if (!SafetyValidator(config).Validate(action, *execution_snapshot,
+                                          &preflight_reason)) {
+      record.state = ActionState::Rejected;
+      record.error_code = ERROR_ACCESS_DISABLED_BY_POLICY;
+      record.error_message = preflight_reason;
+      Logger::Instance().Write(LogLevel::Warn, LogEvent::ActionRejected,
+                               record.error_code);
+      session.actions.push_back(record);
+      if (!manager->Save(session, &error)) {
+        std::cerr << "Safe Mode: cannot persist rejected retry: " << error
+                  << '\n';
+        return 2;
+      }
+      std::cerr << "  " << record.action.id << ": " << record.error_message
+                << '\n';
+      continue;
+    }
+    planned_indices.push_back(session.actions.size());
+    session.actions.push_back(record);
+    if (!manager->Save(session, &error)) {
+      std::cerr << "Safe Mode: cannot persist planned retry: " << error
+                << '\n';
+      return 2;
+    }
+    validated.push_back(action);
+  }
+
+  bool uncertain = false;
+  bool failed = false;
+  if (!validated.empty()) {
+    const auto batch_results = executor.ExecuteGracefulCloseBatch(
+        validated, *execution_snapshot,
+        config.coding_profile.graceful_close_batch_budget_ms);
+    for (std::size_t index = 0; index < batch_results.size(); ++index) {
+      session.actions[planned_indices[index]] = batch_results[index];
+      if (!manager->Save(session, &error)) {
+        std::cerr << "Safe Mode: retry state persistence failed: " << error
+                  << '\n';
+        return 2;
+      }
+      const auto& result = session.actions[planned_indices[index]];
+      if (!result.result_message.empty()) {
+        std::cout << "  " << result.action.id << ": "
+                  << result.result_message << '\n';
+      }
+      if (result.state == ActionState::Failed ||
+          result.state == ActionState::Uncertain ||
+          result.state == ActionState::Rejected) {
+        std::cerr << "  " << result.action.id << ": "
+                  << result.error_message << '\n';
+        Logger::Instance().Write(
+            result.state == ActionState::Rejected ? LogLevel::Warn
+                                                  : LogLevel::Error,
+            result.state == ActionState::Rejected
+                ? LogEvent::ActionRejected
+                : LogEvent::ActionFailed,
+            static_cast<std::uint32_t>(result.error_code));
+      }
+      if (result.state == ActionState::Uncertain) uncertain = true;
+      if (result.state == ActionState::Failed) failed = true;
+    }
+  }
+  if (uncertain) {
+    session.state = SessionState::SafeMode;
+    std::string persist_error;
+    if (!manager->Save(session, &persist_error)) {
+      std::cerr << "Safe Mode persistence failed: " << persist_error << '\n';
+    }
+    std::cerr << "Safe Mode: a retry outcome is uncertain; run 'workboost "
+                 "recovery acknowledge' after reviewing the processes.\n";
+    return 2;
+  }
+
+  auto verification = CaptureActionState(config, &error);
+  if (!verification) {
+    session.state = SessionState::SafeMode;
+    manager->Save(session, &error);
+    std::cerr << "Safe Mode: retry completed but verification failed: "
+              << error << '\n';
+    return 2;
+  }
+  SnapshotHistory report_history(1);
+  report_history.Add(*verification);
+  const auto diagnoses =
+      DiagnosisEngine(config).Evaluate(report_history);
+  std::filesystem::path report;
+  if (!manager->Complete(session, report_history, diagnoses, "retry_close",
+                         &report, &error)) {
+    std::cerr << "Safe Mode: " << error << '\n';
+    return 2;
+  }
+  Logger::Instance().Write(LogLevel::Info, LogEvent::RecoveryCompleted);
+  Logger::Instance().Write(LogLevel::Info, LogEvent::ReportWritten);
+  std::cout << (failed ? "Retry completed with failures.\n"
+                       : "Retry completed.\n")
+            << "Report: " << report.string() << '\n';
+  return failed ? 1 : 0;
 }
 
 int RunDiagnose(const Config& config, const CliOptions& options) {
@@ -1480,6 +1795,14 @@ int RunCli(int argc, char* argv[]) {
     PrintUsage();
     return 64;
   }
+  const bool cleanup_command =
+      positional.size() == 2 && positional[0] == "coding" &&
+      (positional[1] == "enter" || positional[1] == "retry-close");
+  if (!options.cleanup_processes.empty() && !cleanup_command) {
+    std::cerr << "--close-process is only valid with 'coding enter' or "
+                 "'coding retry-close'.\n";
+    return 64;
+  }
   // The dashboard detaches from the console so it keeps running without a
   // terminal window; one-shot CLI commands keep the console for their output.
   const bool dashboard_invocation =
@@ -1564,12 +1887,15 @@ int RunCli(int argc, char* argv[]) {
   }
   if (command == "coding") {
     if (positional.size() != 2 ||
-        (positional[1] != "enter" && positional[1] != "exit")) {
-      std::cerr << "Usage: workboost coding <enter|exit>\n";
+        (positional[1] != "enter" && positional[1] != "exit" &&
+         positional[1] != "retry-close")) {
+      std::cerr << "Usage: workboost coding <enter|exit|retry-close>\n";
       return 64;
     }
     if (positional[1] == "enter")
       return EnterCodingMode(config, options, &sessions);
+    if (positional[1] == "retry-close")
+      return RetryCloseProcesses(config, options, &sessions);
     return RestoreSession(config, &sessions, false);
   }
   if (command == "gui") {

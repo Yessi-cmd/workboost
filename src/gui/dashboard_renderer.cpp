@@ -12,7 +12,6 @@
 #include <sstream>
 #include <string>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -117,6 +116,13 @@ void DrawUtf8(HDC dc, HFONT font, COLORREF color, const std::string& text,
   DrawWide(dc, font, color, windows::Utf8ToWide(text), bounds, format);
 }
 
+int MeasureFontHeight(HDC dc, HFONT font) {
+  if (dc == nullptr || font == nullptr) return 0;
+  SelectScope select(dc, font);
+  TEXTMETRICW metrics{};
+  return GetTextMetricsW(dc, &metrics) ? metrics.tmHeight : 0;
+}
+
 std::string FormatBytes(double bytes) {
   constexpr double kKiB = 1024.0;
   constexpr double kMiB = kKiB * 1024.0;
@@ -199,6 +205,67 @@ bool IsHovered(const std::optional<DashboardUiCommand>& hovered,
 
 }  // namespace
 
+DashboardOverviewLayout CalculateDashboardOverviewLayout(
+    int maximum_height, int overview_width, std::size_t disk_count,
+    int primary_text_height, int secondary_text_height) {
+  constexpr int kHeaderHeight = 44;
+  constexpr int kBottomPadding = 8;
+  constexpr int kDiskColumnGap = 12;
+  const std::size_t item_count = std::max<std::size_t>(1, disk_count);
+  const int primary_height = std::max(1, primary_text_height);
+  const int secondary_height = std::max(1, secondary_text_height);
+
+  const auto calculate = [&](int primary_line_height, int metric_row_height,
+                             int disk_row_height,
+                             int minimum_column_width,
+                             std::size_t column_limit, bool compact) {
+    DashboardOverviewLayout layout;
+    layout.primary_line_height = primary_line_height;
+    layout.metric_row_height = metric_row_height;
+    layout.disk_row_height = disk_row_height;
+    layout.compact = compact;
+
+    const int width_capacity = std::max(
+        1, (std::max(0, overview_width) + kDiskColumnGap) /
+               (minimum_column_width + kDiskColumnGap));
+    const std::size_t maximum_columns = std::max<std::size_t>(
+        1, std::min<std::size_t>(column_limit, width_capacity));
+    const int fixed_height =
+        kHeaderHeight + 3 * metric_row_height + kBottomPadding;
+    const int available_disk_rows = std::max(
+        1, (std::max(0, maximum_height - fixed_height)) / disk_row_height);
+    const std::size_t requested_columns =
+        (item_count + static_cast<std::size_t>(available_disk_rows) - 1) /
+        static_cast<std::size_t>(available_disk_rows);
+    layout.disk_columns =
+        std::clamp(requested_columns, std::size_t{1}, maximum_columns);
+    layout.disk_rows =
+        (item_count + layout.disk_columns - 1) / layout.disk_columns;
+    layout.required_height =
+        fixed_height + static_cast<int>(layout.disk_rows) * disk_row_height;
+    layout.fits = layout.required_height <= maximum_height;
+    return layout;
+  };
+
+  const int regular_primary_height = primary_height + 2;
+  const int regular_row_height =
+      regular_primary_height + secondary_height + 3;
+  auto layout = calculate(regular_primary_height, regular_row_height,
+                          regular_row_height, 152, 3, false);
+  if (layout.fits) return layout;
+
+  const int compact_primary_height = primary_height + 1;
+  const int compact_row_height =
+      compact_primary_height + secondary_height + 1;
+  auto compact_layout = calculate(compact_primary_height, compact_row_height,
+                                  compact_row_height, 112, 4, true);
+  if (compact_layout.fits ||
+      compact_layout.required_height < layout.required_height) {
+    return compact_layout;
+  }
+  return layout;
+}
+
 DashboardRenderer::~DashboardRenderer() {
   for (HFONT font : {brand_font_, page_title_font_, section_font_, body_font_,
                      small_font_, metric_font_, mono_font_}) {
@@ -247,6 +314,18 @@ void DashboardRenderer::RecreateFonts(int dpi) {
   small_font_ = create(9, FW_NORMAL, text_family);
   metric_font_ = create(11, FW_SEMIBOLD, L"Consolas");
   mono_font_ = create(9, FW_NORMAL, L"Consolas");
+
+  HDC metrics_dc = GetDC(window_);
+  body_line_height_ = MeasureFontHeight(metrics_dc, body_font_);
+  small_line_height_ = MeasureFontHeight(metrics_dc, small_font_);
+  metric_line_height_ = MeasureFontHeight(metrics_dc, metric_font_);
+  if (metrics_dc != nullptr) ReleaseDC(window_, metrics_dc);
+  body_line_height_ =
+      std::max(body_line_height_, std::max(1, MulDiv(14, dpi, 96)));
+  small_line_height_ =
+      std::max(small_line_height_, std::max(1, MulDiv(13, dpi, 96)));
+  metric_line_height_ =
+      std::max(metric_line_height_, std::max(1, MulDiv(16, dpi, 96)));
 }
 
 int DashboardRenderer::Scale(int value) const {
@@ -271,7 +350,8 @@ void DashboardRenderer::Paint(
     const std::optional<DashboardViewModel>& model, DashboardPage current_page,
     const std::optional<DashboardUiCommand>& hovered,
     const std::string& status_message,
-    const ProcessViewOptions& process_options) {
+    const ProcessViewOptions& process_options,
+    const CodingModeViewOptions& coding_options) {
   hit_targets_.clear();
   const int width = Width(client);
   const int height = Height(client);
@@ -282,13 +362,13 @@ void DashboardRenderer::Paint(
     if (bitmap != nullptr) DeleteObject(bitmap);
     if (buffer != nullptr) DeleteDC(buffer);
     DrawFrame(target, client, model, current_page, hovered, status_message,
-              process_options);
+              process_options, coding_options);
     return;
   }
   {
     SelectScope select(buffer, bitmap);
     DrawFrame(buffer, client, model, current_page, hovered, status_message,
-              process_options);
+              process_options, coding_options);
     BitBlt(target, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
   }
   DeleteObject(bitmap);
@@ -300,7 +380,8 @@ void DashboardRenderer::DrawFrame(
     const std::optional<DashboardViewModel>& model, DashboardPage current_page,
     const std::optional<DashboardUiCommand>& hovered,
     const std::string& status_message,
-    const ProcessViewOptions& process_options) {
+    const ProcessViewOptions& process_options,
+    const CodingModeViewOptions& coding_options) {
   Fill(dc, client, kWindowBackground);
   const int sidebar_width = Scale(200);
   const int header_height = Scale(72);
@@ -454,7 +535,7 @@ void DashboardRenderer::DrawFrame(
       DrawProtected(dc, content, *model);
       break;
     case DashboardPage::CodingMode:
-      DrawCodingMode(dc, content, *model, hovered);
+      DrawCodingMode(dc, content, *model, coding_options, hovered);
       break;
     case DashboardPage::Recovery:
       DrawRecovery(dc, content, *model, hovered);
@@ -473,11 +554,45 @@ void DashboardRenderer::DrawDashboard(
   const int coding_height = Scale(92);
   const int available =
       std::max(Scale(320), Height(content) - coding_height - gap * 2);
-  const int top_height =
-      std::clamp(static_cast<int>(available * 0.58), Scale(220), Scale(300));
-  const int bottom_height =
-      std::clamp(available - top_height, Scale(132), Scale(180));
+  const int panel_margin = Scale(16);
   const int left_width = static_cast<int>(Width(content) * 0.56);
+  const int overview_width =
+      std::max(0, left_width - gap / 2 - panel_margin * 2);
+  const int base_top_height =
+      std::clamp(static_cast<int>(available * 0.58), Scale(220), Scale(300));
+  const int preferred_top_height =
+      std::max(Scale(220), available - Scale(132));
+  const int maximum_top_height =
+      std::max(preferred_top_height, available - Scale(82));
+  const auto to_logical = [this](int value) {
+    return MulDiv(value, 96, dpi_);
+  };
+  const auto to_logical_ceil = [this](int value) {
+    return std::max(1, (value * 96 + dpi_ - 1) / dpi_);
+  };
+  const int primary_text_height =
+      to_logical_ceil(std::max(body_line_height_, metric_line_height_));
+  const int secondary_text_height = to_logical_ceil(small_line_height_);
+  auto overview_layout = CalculateDashboardOverviewLayout(
+      to_logical(preferred_top_height), to_logical(overview_width),
+      model.disks.size(), primary_text_height, secondary_text_height);
+  if (!overview_layout.fits && maximum_top_height > preferred_top_height) {
+    const auto expanded_layout = CalculateDashboardOverviewLayout(
+        to_logical(maximum_top_height), to_logical(overview_width),
+        model.disks.size(), primary_text_height, secondary_text_height);
+    if (expanded_layout.fits ||
+        expanded_layout.required_height < overview_layout.required_height) {
+      overview_layout = expanded_layout;
+    }
+  }
+  const int row_height = Scale(overview_layout.metric_row_height);
+  const int disk_row_height = Scale(overview_layout.disk_row_height);
+  const int required_top_height = Scale(overview_layout.required_height);
+  const int top_height = std::clamp(
+      std::max(base_top_height, required_top_height), Scale(220),
+      maximum_top_height);
+  const int bottom_height =
+      std::clamp(available - top_height, Scale(82), Scale(180));
   const RECT system_panel =
       MakeRect(content.left, content.top, content.left + left_width - gap / 2,
                content.top + top_height);
@@ -500,100 +615,144 @@ void DashboardRenderer::DrawDashboard(
     RoundedRectangle(dc, panel, kSurface, kBorder, Scale(7));
   }
 
-  const int panel_margin = Scale(16);
   DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("System Overview"),
            MakeRect(system_panel.left + panel_margin,
                     system_panel.top + Scale(10), system_panel.right,
                     system_panel.top + Scale(38)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-  const int label_width = Scale(72);
-  const int value_width = Scale(160);
-  const int row_height = Scale(32);
-  const int subtitle_height = Scale(14);
+  const int content_left = system_panel.left + panel_margin;
+  const int content_right = system_panel.right - panel_margin;
   int row_y = system_panel.top + Scale(44);
   auto draw_metric = [&](const std::string& label, double ratio,
                          const std::string& value, const std::string& detail,
-                         const std::string& subtitle) {
-    const int row_top = row_y;
+                         const std::string& subtitle, const RECT& bounds,
+                         int preferred_label_width,
+                         int preferred_value_width, int metric_height,
+                         bool dense) {
+    const int column_gap = Scale(dense ? 6 : 12);
+    const int minimum_bar_width = Scale(dense ? 20 : 32);
+    const int minimum_value_width = Scale(dense ? 36 : 84);
+    const int maximum_label_width =
+        std::max(Scale(36), Width(bounds) - column_gap * 2 -
+                                minimum_value_width - minimum_bar_width);
+    const int label_width =
+        std::clamp(preferred_label_width, Scale(36), maximum_label_width);
+    const int available_value_width =
+        std::max(0, Width(bounds) - label_width - column_gap * 2 -
+                        minimum_bar_width);
+    const int value_width =
+        std::min(preferred_value_width, available_value_width);
+    const int value_left = bounds.left + label_width + column_gap;
+    const int bar_left = value_left + value_width + column_gap;
+    const int primary_height = std::min(
+        metric_height, Scale(overview_layout.primary_line_height));
+    const int track_height = std::max(1, Scale(5));
+    const int track_y =
+        bounds.top + std::max(0, (primary_height - track_height) / 2);
+    const RECT primary =
+        MakeRect(bounds.left, bounds.top, bounds.right,
+                 bounds.top + primary_height);
     DrawUtf8(dc, body_font_, kPrimaryText, Locale::Get(label),
-             MakeRect(system_panel.left + panel_margin, row_top,
-                      system_panel.left + panel_margin + label_width,
-                      row_top + (subtitle.empty() ? row_height : Scale(18))),
-             subtitle.empty()
-                 ? DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
-                 : DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-    const int bar_left = system_panel.left + panel_margin + label_width;
-    const int bar_right =
-        std::max(bar_left + Scale(32),
-                 static_cast<int>(system_panel.right) - panel_margin -
-                     value_width);
-    const int bar_y = row_top + Scale(15);
-    const RECT track = MakeRect(bar_left, bar_y, bar_right, bar_y + Scale(5));
-    RoundedRectangle(dc, track, kTrack, kTrack, Scale(3));
-    RECT progress = track;
-    progress.right = progress.left +
-                     static_cast<int>(Width(track) * ClampRatio(ratio));
-    if (progress.right > progress.left) {
-      RoundedRectangle(dc, progress,
-                       ratio >= 0.9 ? kCritical
-                                    : ratio >= 0.75 ? kWarning : kAccent,
-                       ratio >= 0.9 ? kCritical
-                                    : ratio >= 0.75 ? kWarning : kAccent,
-                       Scale(3));
+             MakeRect(primary.left, primary.top,
+                      primary.left + label_width, primary.bottom),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (bar_left < bounds.right) {
+      const RECT track =
+          MakeRect(bar_left, track_y, bounds.right, track_y + track_height);
+      RoundedRectangle(dc, track, kTrack, kTrack, Scale(3));
+      RECT progress = track;
+      progress.right = progress.left +
+                       static_cast<int>(Width(track) * ClampRatio(ratio));
+      if (progress.right > progress.left) {
+        RoundedRectangle(dc, progress,
+                         ratio >= 0.9 ? kCritical
+                                      : ratio >= 0.75 ? kWarning : kAccent,
+                         ratio >= 0.9 ? kCritical
+                                      : ratio >= 0.75 ? kWarning : kAccent,
+                         Scale(3));
+      }
     }
     DrawUtf8(dc, metric_font_, kPrimaryText, value,
-             MakeRect(bar_right + Scale(10), row_top,
-                      system_panel.right - panel_margin, row_top + Scale(20)),
-             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (!detail.empty()) {
-      DrawUtf8(dc, small_font_, kSecondaryText, detail,
-               MakeRect(bar_right + Scale(10), row_top + Scale(17),
-                        system_panel.right - panel_margin,
-                        row_top + row_height),
-               DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+             MakeRect(value_left, primary.top, bar_left - column_gap,
+                      primary.bottom),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const std::string& secondary = detail.empty() ? subtitle : detail;
+    if (!secondary.empty()) {
+      const int secondary_left = detail.empty() ? bounds.left : value_left;
+      const int secondary_right =
+          detail.empty() ? bounds.right : bar_left - column_gap;
+      DrawUtf8(dc, small_font_, kSecondaryText, secondary,
+               MakeRect(secondary_left, primary.bottom, secondary_right,
+                        bounds.top + metric_height),
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    // Model label sits directly under its row, left of the value column.
-    if (!subtitle.empty()) {
-      DrawUtf8(dc, small_font_, kSecondaryText, subtitle,
-               MakeRect(system_panel.left + panel_margin,
-                        row_top + row_height, bar_right,
-                        row_top + row_height + subtitle_height),
-               DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-    row_y += subtitle.empty() ? row_height : row_height + subtitle_height;
   };
-  draw_metric("CPU", model.system.cpu_percent / 100.0,
-              FormatPercent(model.system.cpu_percent), std::string{},
-              model.system.cpu_model);
-  draw_metric("Memory", model.system.memory_used_ratio,
-              FormatBytes(static_cast<double>(model.system.memory_used_bytes)) +
-                  " / " +
-                  FormatBytes(
-                      static_cast<double>(model.system.memory_total_bytes)),
-              Locale::Format(
-                  "{0} available",
-                  {FormatBytes(static_cast<double>(
-                      model.system.available_memory_bytes))}),
-              model.system.memory_model);
-  draw_metric("Commit", model.system.commit_ratio,
-              FormatPercent(model.system.commit_ratio * 100.0),
-              Locale::Format(
-                  "{0} page reads/s",
-                  {std::to_string(
-                      static_cast<int>(model.system.page_reads_per_sec))}),
-              std::string{});
-  const std::size_t disk_count = std::min<std::size_t>(2, model.disks.size());
-  for (std::size_t i = 0; i < disk_count; ++i) {
-    const auto& disk = model.disks[i];
-    draw_metric(disk.media + " " + disk.name, disk.active_percent / 100.0,
+
+  const int main_label_width = Scale(72);
+  const int main_value_width = Scale(170);
+  auto draw_main_metric = [&](const std::string& label, double ratio,
+                              const std::string& value,
+                              const std::string& detail,
+                              const std::string& subtitle) {
+    draw_metric(label, ratio, value, detail, subtitle,
+                MakeRect(content_left, row_y, content_right,
+                         row_y + row_height),
+                main_label_width, main_value_width, row_height,
+                false);
+    row_y += row_height;
+  };
+
+  draw_main_metric("CPU", model.system.cpu_percent / 100.0,
+                   FormatPercent(model.system.cpu_percent), std::string{},
+                   model.system.cpu_model);
+  draw_main_metric(
+      "Memory", model.system.memory_used_ratio,
+      FormatBytes(static_cast<double>(model.system.memory_used_bytes)) +
+          " / " +
+          FormatBytes(static_cast<double>(model.system.memory_total_bytes)),
+      std::string{}, model.system.memory_model);
+  draw_main_metric(
+      "Commit", model.system.commit_ratio,
+      FormatPercent(model.system.commit_ratio * 100.0),
+      Locale::Format(
+          "{0} page reads/s",
+          {std::to_string(
+              static_cast<int>(model.system.page_reads_per_sec))}),
+      std::string{});
+
+  const int disk_column_gap = Scale(12);
+  const int disk_columns =
+      std::max(1, static_cast<int>(overview_layout.disk_columns));
+  const int disk_width =
+      std::max(1, (content_right - content_left -
+                   disk_column_gap * (disk_columns - 1)) /
+                      disk_columns);
+  for (std::size_t index = 0; index < model.disks.size(); ++index) {
+    const auto& disk = model.disks[index];
+    const int column = static_cast<int>(index % overview_layout.disk_columns);
+    const int row = static_cast<int>(index / overview_layout.disk_columns);
+    const int left = content_left + column * (disk_width + disk_column_gap);
+    const int right = column + 1 == disk_columns ? content_right
+                                                 : left + disk_width;
+    const int top = row_y + row * disk_row_height;
+    const bool dense = disk_columns > 1;
+    const int disk_label_width =
+        dense ? std::clamp(disk_width / 3, Scale(40), Scale(64))
+              : main_label_width;
+    draw_metric(disk.media + " " + disk.name,
+                disk.active_percent / 100.0,
                 FormatPercent(disk.active_percent),
-                FormatLatency(disk.latency_ms), std::string{});
+                FormatLatency(disk.latency_ms), std::string{},
+                MakeRect(left, top, right, top + disk_row_height),
+                disk_label_width,
+                dense ? Scale(56) : main_value_width, disk_row_height, dense);
   }
   if (model.disks.empty()) {
     DrawUtf8(dc, small_font_, kMutedText,
              Locale::Get("No physical disk counters available"),
              MakeRect(system_panel.left + panel_margin, row_y,
-                      system_panel.right - panel_margin, row_y + row_height),
+                      system_panel.right - panel_margin,
+                      row_y + disk_row_height),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
   }
 
@@ -662,66 +821,77 @@ void DashboardRenderer::DrawDashboard(
                     impact_panel.top + Scale(9), impact_panel.right,
                     impact_panel.top + Scale(36)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-  struct ImpactAggregate {
-    std::string name;
-    double io_bytes_per_sec{};
-    double cpu_percent{};
-    ImpactLevel impact{ImpactLevel::Low};
-  };
-  std::vector<ImpactAggregate> impact_processes;
-  std::unordered_map<std::string, std::size_t> impact_by_name;
-  for (const auto& process : model.processes) {
-    const auto [position, inserted] =
-        impact_by_name.emplace(process.name, impact_processes.size());
-    if (inserted) {
-      impact_processes.push_back(
-          ImpactAggregate{process.name, 0.0, 0.0, ImpactLevel::Low});
-    }
-    auto& aggregate = impact_processes[position->second];
-    aggregate.io_bytes_per_sec +=
-        process.read_bytes_per_sec + process.write_bytes_per_sec;
-    aggregate.cpu_percent += process.cpu_percent;
-    if (ImpactRank(process.impact) > ImpactRank(aggregate.impact)) {
-      aggregate.impact = process.impact;
-    }
-  }
-  std::stable_sort(impact_processes.begin(), impact_processes.end(),
-                   [](const auto& left, const auto& right) {
-                     if (ImpactRank(left.impact) != ImpactRank(right.impact)) {
-                       return ImpactRank(left.impact) > ImpactRank(right.impact);
-                     }
-                     return left.io_bytes_per_sec != right.io_bytes_per_sec
-                                ? left.io_bytes_per_sec > right.io_bytes_per_sec
-                                : left.cpu_percent > right.cpu_percent;
-                   });
-  int impact_y = impact_panel.top + Scale(42);
+  const int impact_left = impact_panel.left + panel_margin;
+  const int impact_right = impact_panel.right - panel_margin;
+  const int impact_width = std::max(0, impact_right - impact_left);
+  const int name_right = impact_left + impact_width * 38 / 100;
+  const int cpu_right = impact_left + impact_width * 51 / 100;
+  const int memory_right = impact_left + impact_width * 68 / 100;
+  const int io_right = impact_left + impact_width * 86 / 100;
+  const int header_top = impact_panel.top + Scale(34);
+  const int header_bottom = header_top + Scale(16);
+  const int column_gap = Scale(5);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Name"),
+           MakeRect(impact_left, header_top, name_right - column_gap,
+                    header_bottom),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("CPU"),
+           MakeRect(name_right, header_top, cpu_right - column_gap,
+                    header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Memory"),
+           MakeRect(cpu_right, header_top, memory_right - column_gap,
+                    header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Disk I/O"),
+           MakeRect(memory_right, header_top, io_right - column_gap,
+                    header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  DrawUtf8(dc, small_font_, kMutedText, Locale::Get("Impact"),
+           MakeRect(io_right, header_top, impact_right, header_bottom),
+           DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+  int impact_y = header_bottom;
+  const int impact_row_height = Scale(28);
+  const int available_impact_height =
+      std::max(0, static_cast<int>(impact_panel.bottom) - impact_y);
+  const std::size_t impact_capacity =
+      static_cast<std::size_t>(available_impact_height / impact_row_height);
   const std::size_t impact_count =
-      std::min<std::size_t>(3, impact_processes.size());
+      std::min({std::size_t{3}, model.top_impacts.size(), impact_capacity});
   for (std::size_t i = 0; i < impact_count; ++i) {
-    const auto& process = impact_processes[i];
+    const auto& process = model.top_impacts[i];
     DrawUtf8(dc, body_font_, kPrimaryText, process.name,
-             MakeRect(impact_panel.left + panel_margin, impact_y,
-                      impact_panel.left + static_cast<int>(Width(impact_panel) * 0.48),
-                      impact_y + Scale(26)),
+             MakeRect(impact_left, impact_y, name_right - column_gap,
+                      impact_y + impact_row_height),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    DrawUtf8(dc, metric_font_, kSecondaryText,
+    DrawUtf8(dc, metric_font_, ImpactColor(process.cpu_impact),
+             FormatPercent(process.cpu_percent),
+             MakeRect(name_right, impact_y, cpu_right - column_gap,
+                      impact_y + impact_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, ImpactColor(process.memory_impact),
+             FormatBytes(static_cast<double>(process.private_bytes)),
+             MakeRect(cpu_right, impact_y, memory_right - column_gap,
+                      impact_y + impact_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, ImpactColor(process.io_impact),
              FormatRate(process.io_bytes_per_sec),
-             MakeRect(impact_panel.left + static_cast<int>(Width(impact_panel) * 0.48),
-                      impact_y, impact_panel.right - Scale(74),
-                      impact_y + Scale(26)),
+             MakeRect(memory_right, impact_y, io_right - column_gap,
+                      impact_y + impact_row_height),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawUtf8(dc, small_font_, ImpactColor(process.impact),
-             ImpactText(process.impact),
-             MakeRect(impact_panel.right - Scale(66), impact_y,
-                      impact_panel.right - panel_margin, impact_y + Scale(26)),
+             Locale::Get(ImpactText(process.impact)),
+             MakeRect(io_right, impact_y, impact_right,
+                      impact_y + impact_row_height),
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-    impact_y += Scale(28);
+    impact_y += impact_row_height;
   }
-  if (impact_processes.empty()) {
+  if (model.top_impacts.empty()) {
     DrawUtf8(dc, small_font_, kMutedText,
              Locale::Get("No process inventory available"),
-             MakeRect(impact_panel.left + panel_margin, impact_y,
-                      impact_panel.right - panel_margin, impact_y + Scale(28)),
+             MakeRect(impact_left, impact_y, impact_right,
+                      impact_y + impact_row_height),
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
 
@@ -731,8 +901,12 @@ void DashboardRenderer::DrawDashboard(
                     protected_panel.top + Scale(36)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   int protected_y = protected_panel.top + Scale(42);
+  const std::size_t protected_capacity = static_cast<std::size_t>(std::max(
+      0, (Height(protected_panel) - Scale(42)) / Scale(39)));
   const std::size_t protected_count =
-      std::min<std::size_t>(3, model.protected_workloads.size());
+      std::min(
+          {std::size_t{3}, model.protected_workloads.size(),
+           protected_capacity});
   for (std::size_t i = 0; i < protected_count; ++i) {
     const auto& workload = model.protected_workloads[i];
     EllipseFill(dc,
@@ -1207,6 +1381,7 @@ void DashboardRenderer::DrawProtected(HDC dc, const RECT& content,
 
 void DashboardRenderer::DrawCodingMode(
     HDC dc, const RECT& content, const DashboardViewModel& model,
+    const CodingModeViewOptions& options,
     const std::optional<DashboardUiCommand>& hovered) {
   const int margin = Scale(20);
   const RECT summary =
@@ -1234,6 +1409,9 @@ void DashboardRenderer::DrawCodingMode(
   const std::string counts =
       Locale::Format("{0} planned changes",
                      {std::to_string(model.coding_mode.planned_actions)}) +
+      "   ·   " +
+      Locale::Format("{0} cleanup selections",
+                     {std::to_string(options.cleanup_processes.size())}) +
       "   ·   " +
       Locale::Format("{0} protected workloads",
                      {std::to_string(model.coding_mode.protected_workloads)});
@@ -1270,18 +1448,304 @@ void DashboardRenderer::DrawCodingMode(
   const RECT details =
       MakeRect(content.left, summary.bottom + Scale(16), content.right,
                content.bottom);
-  RoundedRectangle(dc, details, kSurface, kBorder, Scale(7));
-  DrawUtf8(dc, section_font_, kPrimaryText,
-           Locale::Get(model.coding_mode.active ? "Active Changes"
-                                                : "Plan Preview"),
-           MakeRect(details.left + margin, details.top + Scale(12),
-                    details.right - margin, details.top + Scale(42)),
+  if (model.coding_mode.active || model.coding_mode.safe_mode ||
+      model.coding_mode.operation_in_progress) {
+    RoundedRectangle(dc, details, kSurface, kBorder, Scale(7));
+    DrawUtf8(dc, section_font_, kPrimaryText,
+             Locale::Get(model.coding_mode.active ? "Active Changes"
+                                                  : "Plan Preview"),
+             MakeRect(details.left + margin, details.top + Scale(12),
+                      details.right - margin, details.top + Scale(42)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextPage(dc,
+                 MakeRect(details.left + margin, details.top + Scale(48),
+                          details.right - margin, details.bottom - margin),
+                 model.pages[static_cast<std::size_t>(
+                     DashboardPage::CodingMode)]);
+    return;
+  }
+
+  const int gap = Scale(14);
+  const int left_width =
+      std::max(Scale(560), static_cast<int>(Width(details) * 0.66));
+  const RECT process_panel = MakeRect(
+      details.left, details.top,
+      std::min(details.right - Scale(280), details.left + left_width),
+      details.bottom);
+  const RECT pool_panel = MakeRect(process_panel.right + gap, details.top,
+                                   details.right, details.bottom);
+  RoundedRectangle(dc, process_panel, kSurface, kBorder, Scale(7));
+  RoundedRectangle(dc, pool_panel, kSurface, kBorder, Scale(7));
+
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Current Processes"),
+           MakeRect(process_panel.left + margin,
+                    process_panel.top + Scale(10),
+                    process_panel.right - margin,
+                    process_panel.top + Scale(38)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-  DrawTextPage(dc,
-               MakeRect(details.left + margin, details.top + Scale(48),
-                        details.right - margin, details.bottom - margin),
-               model.pages[static_cast<std::size_t>(
-                   DashboardPage::CodingMode)]);
+  DrawUtf8(dc, small_font_, kSecondaryText,
+           Locale::Get(
+               "Click an available process to add it to the cleanup pool."),
+           MakeRect(process_panel.left + margin,
+                    process_panel.top + Scale(38),
+                    process_panel.right - margin,
+                    process_panel.top + Scale(62)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+  const int process_header_y = process_panel.top + Scale(66);
+  Fill(dc,
+       MakeRect(process_panel.left + Scale(1), process_header_y,
+                process_panel.right - Scale(1), process_header_y + Scale(30)),
+       RGB(248, 249, 251));
+  const int process_usable = Width(process_panel) - margin * 2;
+  const std::array<int, 6> columns{
+      process_panel.left + margin,
+      process_panel.left + margin + static_cast<int>(process_usable * 0.35),
+      process_panel.left + margin + static_cast<int>(process_usable * 0.48),
+      process_panel.left + margin + static_cast<int>(process_usable * 0.66),
+      process_panel.left + margin + static_cast<int>(process_usable * 0.84),
+      process_panel.right - margin};
+  const std::array<const char*, 5> labels{"Name", "CPU", "Memory",
+                                          "Disk I/O", "State"};
+  for (std::size_t index = 0; index < labels.size(); ++index) {
+    DrawUtf8(dc, small_font_, kMutedText, Locale::Get(labels[index]),
+             MakeRect(columns[index], process_header_y,
+                      columns[index + 1] - Scale(6),
+                      process_header_y + Scale(30)),
+             index == 0 ? DT_LEFT | DT_VCENTER | DT_SINGLELINE
+                        : DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+  }
+
+  const auto is_selected = [&options](const ProcessViewModel& process) {
+    return std::any_of(
+        options.cleanup_processes.begin(), options.cleanup_processes.end(),
+        [&process](const ProcessSelection& selected) {
+          return selected.pid == process.pid &&
+                 selected.expected_start_time_100ns ==
+                     process.start_time_100ns;
+        });
+  };
+  std::vector<const ProcessViewModel*> coding_processes;
+  coding_processes.reserve(model.processes.size());
+  for (const auto& process : model.processes) {
+    coding_processes.push_back(&process);
+  }
+  std::stable_sort(
+      coding_processes.begin(), coding_processes.end(),
+      [&is_selected](const ProcessViewModel* left,
+                     const ProcessViewModel* right) {
+        const int left_rank = is_selected(*left)
+                                  ? 0
+                                  : left->cleanup_eligible ? 1 : 2;
+        const int right_rank = is_selected(*right)
+                                   ? 0
+                                   : right->cleanup_eligible ? 1 : 2;
+        return left_rank < right_rank;
+      });
+  const int process_row_height = Scale(40);
+  int process_y = process_header_y + Scale(30);
+  const std::size_t process_capacity = static_cast<std::size_t>(std::max(
+      0L,
+      (process_panel.bottom - process_y - Scale(28)) / process_row_height));
+  const std::size_t maximum_offset =
+      coding_processes.size() > process_capacity
+          ? coding_processes.size() - process_capacity
+          : 0;
+  const std::size_t offset =
+      std::min(options.process_scroll_offset, maximum_offset);
+  const std::size_t process_end =
+      std::min(coding_processes.size(), offset + process_capacity);
+  for (std::size_t index = offset; index < process_end; ++index) {
+    const auto& process = *coding_processes[index];
+    const bool selected = is_selected(process);
+    const DashboardUiCommand row_command{
+        DashboardUiAction::ToggleCleanupProcess, DashboardPage::CodingMode,
+        process.pid};
+    const RECT row = MakeRect(process_panel.left + Scale(1), process_y,
+                              process_panel.right - Scale(1),
+                              process_y + process_row_height);
+    if (selected) {
+      Fill(dc, row, kAccentSoft);
+    } else if (IsHovered(hovered, row_command)) {
+      Fill(dc, row, RGB(247, 249, 252));
+    } else if (index % 2 != 0) {
+      Fill(dc, row, RGB(251, 252, 253));
+    }
+    const COLORREF text_color =
+        process.cleanup_eligible || selected ? kPrimaryText : kMutedText;
+    DrawUtf8(dc, body_font_, text_color, process.name,
+             MakeRect(columns[0], process_y, columns[1] - Scale(6),
+                      process_y + process_row_height),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, text_color,
+             FormatPercent(process.cpu_percent),
+             MakeRect(columns[1], process_y, columns[2] - Scale(6),
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    DrawUtf8(dc, metric_font_, text_color,
+             FormatBytes(static_cast<double>(process.working_set_bytes)),
+             MakeRect(columns[2], process_y, columns[3] - Scale(6),
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, text_color,
+             FormatRate(process.read_bytes_per_sec +
+                        process.write_bytes_per_sec),
+             MakeRect(columns[3], process_y, columns[4] - Scale(6),
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const std::string state =
+        selected ? Locale::Get("Selected")
+                 : Locale::Get(process.cleanup_block_reason);
+    DrawUtf8(dc, small_font_,
+             selected ? kAccent
+                      : process.cleanup_eligible ? kSuccess : kMutedText,
+             state,
+             MakeRect(columns[4], process_y, columns[5],
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    Line(dc, process_panel.left + margin,
+         process_y + process_row_height - 1, process_panel.right - margin,
+         process_y + process_row_height - 1, kBorder);
+    AddTarget(row, row_command);
+    process_y += process_row_height;
+  }
+  if (coding_processes.empty()) {
+    DrawUtf8(dc, body_font_, kMutedText,
+             Locale::Get("No process inventory is available."),
+             MakeRect(process_panel.left + margin, process_y + Scale(16),
+                      process_panel.right - margin, process_y + Scale(52)),
+             DT_LEFT | DT_TOP | DT_WORDBREAK);
+  } else {
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Format("Showing {0}-{1} of {2}; use the mouse wheel.",
+                            {std::to_string(offset + 1),
+                             std::to_string(process_end),
+                             std::to_string(coding_processes.size())}),
+             MakeRect(process_panel.left + margin,
+                      process_panel.bottom - Scale(28),
+                      process_panel.right - margin,
+                      process_panel.bottom - Scale(6)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
+
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Cleanup Pool"),
+           MakeRect(pool_panel.left + margin, pool_panel.top + Scale(10),
+                    pool_panel.right - margin,
+                    pool_panel.top + Scale(38)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  DrawUtf8(dc, small_font_, kSecondaryText,
+           Locale::Get("Click a selected process to remove it."),
+           MakeRect(pool_panel.left + margin, pool_panel.top + Scale(38),
+                    pool_panel.right - margin,
+                    pool_panel.top + Scale(62)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  int pool_y = pool_panel.top + Scale(72);
+  const int pool_row_height = Scale(58);
+  const int automatic_plan_height = Scale(132);
+  const int pool_list_bottom =
+      std::max(pool_y + Scale(58),
+               static_cast<int>(pool_panel.bottom) - automatic_plan_height);
+  const std::size_t pool_capacity = static_cast<std::size_t>(std::max(
+      0, (pool_list_bottom - pool_y - Scale(28)) / pool_row_height));
+  const std::size_t maximum_pool_offset =
+      options.cleanup_processes.size() > pool_capacity
+          ? options.cleanup_processes.size() - pool_capacity
+          : 0;
+  const std::size_t pool_offset =
+      std::min(options.pool_scroll_offset, maximum_pool_offset);
+  const std::size_t pool_end = std::min(
+      options.cleanup_processes.size(), pool_offset + pool_capacity);
+  for (std::size_t index = pool_offset; index < pool_end; ++index) {
+    const auto& selected = options.cleanup_processes[index];
+    const auto process = std::find_if(
+        model.processes.begin(), model.processes.end(),
+        [&selected](const ProcessViewModel& candidate) {
+          return candidate.pid == selected.pid &&
+                 candidate.start_time_100ns ==
+                     selected.expected_start_time_100ns;
+        });
+    if (process == model.processes.end()) continue;
+    const DashboardUiCommand row_command{
+        DashboardUiAction::ToggleCleanupProcess, DashboardPage::CodingMode,
+        process->pid};
+    const RECT row = MakeRect(pool_panel.left + Scale(1), pool_y,
+                              pool_panel.right - Scale(1),
+                              pool_y + pool_row_height);
+    Fill(dc, row,
+         IsHovered(hovered, row_command) ? RGB(230, 239, 252)
+                                         : kAccentSoft);
+    DrawUtf8(dc, body_font_, kPrimaryText, process->name,
+             MakeRect(row.left + margin, row.top + Scale(4),
+                      row.right - margin, row.top + Scale(28)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const std::string metrics =
+        "PID " + std::to_string(process->pid) + "  |  " +
+        FormatPercent(process->cpu_percent) + "  |  " +
+        FormatBytes(static_cast<double>(process->working_set_bytes)) +
+        "  |  " +
+        FormatRate(process->read_bytes_per_sec +
+                   process->write_bytes_per_sec);
+    DrawUtf8(dc, small_font_, kSecondaryText, metrics,
+             MakeRect(row.left + margin, row.top + Scale(27),
+                      row.right - margin, row.bottom - Scale(4)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    Line(dc, row.left + margin, row.bottom - 1, row.right - margin,
+         row.bottom - 1, RGB(202, 218, 242));
+    AddTarget(row, row_command);
+    pool_y += pool_row_height;
+  }
+  if (options.cleanup_processes.empty()) {
+    DrawUtf8(dc, body_font_, kMutedText,
+             Locale::Get("No processes selected."),
+             MakeRect(pool_panel.left + margin, pool_y + Scale(20),
+                      pool_panel.right - margin,
+                      std::min(pool_list_bottom, pool_y + Scale(58))),
+             DT_LEFT | DT_TOP | DT_WORDBREAK);
+  } else if (pool_offset != 0 ||
+             pool_end < options.cleanup_processes.size()) {
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Format("Showing {0}-{1} of {2}; use the mouse wheel.",
+                            {std::to_string(pool_offset + 1),
+                             std::to_string(pool_end),
+                             std::to_string(
+                                 options.cleanup_processes.size())}),
+             MakeRect(pool_panel.left + margin,
+                      pool_list_bottom - Scale(28),
+                      pool_panel.right - margin,
+                      pool_list_bottom - Scale(6)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
+
+  const int plan_top = pool_list_bottom + Scale(4);
+  Line(dc, pool_panel.left + margin, plan_top, pool_panel.right - margin,
+       plan_top, kBorder);
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Automatic Plan"),
+           MakeRect(pool_panel.left + margin, plan_top + Scale(6),
+                    pool_panel.right - margin, plan_top + Scale(34)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  int action_y = plan_top + Scale(38);
+  const std::size_t action_count =
+      std::min<std::size_t>(2, model.coding_mode.actions.size());
+  for (std::size_t index = 0; index < action_count; ++index) {
+    const auto& action = model.coding_mode.actions[index];
+    DrawUtf8(dc, body_font_, kPrimaryText, action.target,
+             MakeRect(pool_panel.left + margin, action_y,
+                      pool_panel.right - margin, action_y + Scale(22)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, small_font_, kSecondaryText,
+             Locale::Get(action.action) + "  |  " + Locale::Get(action.risk),
+             MakeRect(pool_panel.left + margin, action_y + Scale(20),
+                      pool_panel.right - margin, action_y + Scale(40)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    action_y += Scale(44);
+  }
+  if (model.coding_mode.actions.empty()) {
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Get("No automatic actions."),
+             MakeRect(pool_panel.left + margin, action_y,
+                      pool_panel.right - margin, action_y + Scale(28)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  }
 }
 
 void DashboardRenderer::DrawRecovery(

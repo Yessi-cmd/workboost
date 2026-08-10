@@ -237,6 +237,16 @@ struct RuntimeContext {
   std::uint32_t foreground_pid{};
 };
 
+// Protection state aggregated across a baseline window. A remote/debug
+// connection or capture that was observed at any point in the window must
+// keep its PID protected even if it disappears from the latest snapshot.
+struct WindowRuntimeContext {
+  RuntimeContext context;
+  std::size_t total_samples{};
+  std::size_t complete_process_samples{};
+  std::size_t complete_tcp_samples{};
+};
+
 std::string ToString(ProcessClass value);
 std::string ToString(ProtectionLevel value);
 std::string ToString(DiskMedia value);
@@ -255,6 +265,9 @@ ServiceClass ServiceClassFromString(const std::string& value);
 RuntimeContext BuildRuntimeContext(const SystemSnapshot& snapshot);
 RuntimeContext BuildRuntimeContext(
     const SystemSnapshot& snapshot,
+    const std::unordered_set<std::uint16_t>& protected_remote_ports);
+WindowRuntimeContext BuildWindowRuntimeContext(
+    const SnapshotHistory& history,
     const std::unordered_set<std::uint16_t>& protected_remote_ports);
 
 }  // namespace workboost

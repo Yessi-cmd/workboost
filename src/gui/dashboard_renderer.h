@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +28,7 @@ enum class DashboardUiAction {
   ProcessSortIo,
   ProcessSortImpact,
   SelectProcess,
+  ToggleCleanupProcess,
 };
 
 struct DashboardUiCommand {
@@ -54,6 +56,30 @@ struct ProcessViewOptions {
   bool search_focused{};
 };
 
+struct CodingModeViewOptions {
+  std::vector<ProcessSelection> cleanup_processes;
+  std::size_t process_scroll_offset{};
+  std::size_t pool_scroll_offset{};
+};
+
+// Device-independent geometry for the variable-length System Overview list.
+// Keeping this calculation separate from GDI drawing makes the responsive
+// behavior deterministic and unit-testable.
+struct DashboardOverviewLayout {
+  int primary_line_height{};
+  int metric_row_height{};
+  int disk_row_height{};
+  std::size_t disk_columns{1};
+  std::size_t disk_rows{1};
+  int required_height{};
+  bool compact{};
+  bool fits{};
+};
+
+[[nodiscard]] DashboardOverviewLayout CalculateDashboardOverviewLayout(
+    int maximum_height, int overview_width, std::size_t disk_count,
+    int primary_text_height, int secondary_text_height);
+
 class DashboardRenderer {
  public:
   DashboardRenderer() = default;
@@ -68,7 +94,8 @@ class DashboardRenderer {
              DashboardPage current_page,
              const std::optional<DashboardUiCommand>& hovered,
              const std::string& status_message,
-             const ProcessViewOptions& process_options = {});
+             const ProcessViewOptions& process_options = {},
+             const CodingModeViewOptions& coding_options = {});
   [[nodiscard]] std::optional<DashboardUiCommand> HitTest(POINT point) const;
 
   // Recreates fonts after the interface language changed (the active locale
@@ -87,7 +114,8 @@ class DashboardRenderer {
                  DashboardPage current_page,
                  const std::optional<DashboardUiCommand>& hovered,
                  const std::string& status_message,
-                 const ProcessViewOptions& process_options);
+                 const ProcessViewOptions& process_options,
+                 const CodingModeViewOptions& coding_options);
   void DrawDashboard(HDC dc, const RECT& content,
                      const DashboardViewModel& model,
                      const std::optional<DashboardUiCommand>& hovered);
@@ -101,6 +129,7 @@ class DashboardRenderer {
                      const DashboardViewModel& model);
   void DrawCodingMode(HDC dc, const RECT& content,
                       const DashboardViewModel& model,
+                      const CodingModeViewOptions& options,
                       const std::optional<DashboardUiCommand>& hovered);
   void DrawRecovery(HDC dc, const RECT& content,
                     const DashboardViewModel& model,
@@ -121,6 +150,9 @@ class DashboardRenderer {
   HFONT small_font_{};
   HFONT metric_font_{};
   HFONT mono_font_{};
+  int body_line_height_{};
+  int small_line_height_{};
+  int metric_line_height_{};
   std::vector<HitTarget> hit_targets_;
 };
 

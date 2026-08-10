@@ -6,11 +6,13 @@
 #include <filesystem>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace workboost {
 namespace {
 
 constexpr std::size_t kMaximumCapturedOutputBytes = 1024 * 1024;
+constexpr std::size_t kMaximumCleanupProcesses = 64;
 
 CodingModeCommandResult Failure(const std::string& context,
                                 std::uint32_t error_code) {
@@ -19,11 +21,29 @@ CodingModeCommandResult Failure(const std::string& context,
   return result;
 }
 
-std::wstring FixedArguments(CodingModeCommand command, int baseline_seconds) {
+std::wstring FixedArguments(
+    CodingModeCommand command, int baseline_seconds,
+    const std::vector<ProcessSelection>& cleanup_processes) {
   switch (command) {
-    case CodingModeCommand::Enter:
-      return L" coding enter --baseline-duration " +
-             std::to_wstring(baseline_seconds);
+    case CodingModeCommand::Enter: {
+      std::wstring arguments = L" coding enter --baseline-duration " +
+                               std::to_wstring(baseline_seconds);
+      for (const auto& process : cleanup_processes) {
+        arguments += L" --close-process " + std::to_wstring(process.pid) +
+                     L":" +
+                     std::to_wstring(process.expected_start_time_100ns);
+      }
+      return arguments;
+    }
+    case CodingModeCommand::RetryClose: {
+      std::wstring arguments = L" coding retry-close";
+      for (const auto& process : cleanup_processes) {
+        arguments += L" --close-process " + std::to_wstring(process.pid) +
+                     L":" +
+                     std::to_wstring(process.expected_start_time_100ns);
+      }
+      return arguments;
+    }
     case CodingModeCommand::Exit: return L" coding exit";
     case CodingModeCommand::Restore: return L" recovery restore";
   }
@@ -33,10 +53,28 @@ std::wstring FixedArguments(CodingModeCommand command, int baseline_seconds) {
 }  // namespace
 
 CodingModeCommandResult CodingModeCommandClient::Execute(
-    CodingModeCommand command, int baseline_seconds) {
+    CodingModeCommand command, int baseline_seconds,
+    const std::vector<ProcessSelection>& cleanup_processes) {
   if (command == CodingModeCommand::Enter &&
       (baseline_seconds < 10 || baseline_seconds > 600)) {
     return Failure("Validate Coding Mode baseline", ERROR_INVALID_PARAMETER);
+  }
+  if (command == CodingModeCommand::RetryClose &&
+      cleanup_processes.empty()) {
+    return Failure("Validate Coding Mode retry pool",
+                   ERROR_INVALID_PARAMETER);
+  }
+  if ((command != CodingModeCommand::Enter &&
+       command != CodingModeCommand::RetryClose &&
+       !cleanup_processes.empty()) ||
+      cleanup_processes.size() > kMaximumCleanupProcesses ||
+      std::any_of(cleanup_processes.begin(), cleanup_processes.end(),
+                  [](const ProcessSelection& process) {
+                    return process.pid == 0 ||
+                           process.expected_start_time_100ns == 0;
+                  })) {
+    return Failure("Validate Coding Mode cleanup pool",
+                   ERROR_INVALID_PARAMETER);
   }
   windows::WindowsError path_error;
   const auto executable = windows::CurrentExecutablePath(&path_error);
@@ -75,7 +113,8 @@ CodingModeCommandResult CodingModeCommandClient::Execute(
   startup.hStdError = output_write.Get();
   PROCESS_INFORMATION process{};
   std::wstring command_line = L"\"" + executable->wstring() + L"\"" +
-                              FixedArguments(command, baseline_seconds);
+                              FixedArguments(command, baseline_seconds,
+                                             cleanup_processes);
   std::wstring working_directory = executable->parent_path().wstring();
   if (!CreateProcessW(executable->c_str(), command_line.data(), nullptr,
                       nullptr, TRUE, CREATE_NO_WINDOW, nullptr,

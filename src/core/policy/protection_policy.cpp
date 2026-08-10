@@ -59,9 +59,11 @@ bool ProtectionPolicy::CanChangePriority(const ProcessSnapshot& process,
 }
 
 bool ProtectionPolicy::CanGracefullyClose(
-    const ProcessSnapshot& process, const RuntimeContext& context) const {
+    const ProcessSnapshot& process, const RuntimeContext& context,
+    bool explicitly_selected) const {
   if (IsProtected(process, context)) return false;
-  return config_.coding_profile.allow_graceful_close.count(
+  return explicitly_selected ||
+         config_.coding_profile.allow_graceful_close.count(
              ToLowerAscii(process.name)) != 0;
 }
 

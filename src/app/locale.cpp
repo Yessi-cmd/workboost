@@ -49,7 +49,8 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
         {"Top Impact", "高影响进程"},
         {"CPU", "CPU"},
         {"Memory", "内存"},
-        {"Commit", "提交"},
+        {"Impact", "影响"},
+        {"Commit", "提交内存"},
         {"{0} available", "{0} 可用"},
         {"{0} page reads/s", "{0} 页读取/秒"},
         {"No physical disk counters available", "无物理磁盘计数器"},
@@ -79,6 +80,7 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
         {"Medium", "中"},
         {"Low", "低"},
         {"Critical", "严重"},
+        {"Safe", "安全"},
 
         // Protected workload page.
         {"WorkBoost will not modify these active development tasks.",
@@ -93,6 +95,7 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
          "capture, Git, and build work protected.",
          "降低不必要的后台活动，同时保护 SSH、串口、抓包、Git 与构建工作。"},
         {"{0} planned changes", "{0} 项计划变更"},
+        {"{0} cleanup selections", "{0} 个清理池进程"},
         {"{0} protected workloads", "{0} 项受保护负载"},
         {"Working...", "处理中…"},
         {"View Recovery", "查看恢复"},
@@ -106,11 +109,56 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
          "正在恢复可逆操作并验证系统状态…"},
         {"Restoring the unfinished session and verifying system state...",
          "正在恢复未完成的会话并验证系统状态…"},
+        {"Retrying graceful close for unclosed processes...",
+         "正在对退出后仍运行的进程重新发送关闭请求…"},
+        {"Cleanup retry completed.", "清理重试已完成。"},
+        {"Cleanup retry completed. Revalidation, session persistence, and "
+         "reporting used the standard Coding Mode path.",
+         "清理重试已完成。重新校验、会话持久化与报告均使用标准编码模式链路。"},
+        {"Cleanup Retry", "清理重试"},
+        {"Retry Cleanup", "重试清理"},
+        {"Cleanup processes kept running.", "清理进程保持运行。"},
+        {"{0} cleanup process(es) are still running after exit:\r\n{1}\r\n"
+         "Retry graceful close now? Choosing No keeps them running.",
+         "退出后仍有 {0} 个清理进程在运行：\r\n{1}\r\n"
+         "是否立即重新发送关闭请求？选择“否”则保持这些进程运行。"},
         {"Apply the reviewed Coding Mode plan?\n\n{0} planned action(s)\n{1} "
-         "protected workload(s)\n\nA 10-second baseline is captured first. "
+         "cleanup process(es)\n{2} protected workload(s)\n\nA 10-second "
+         "baseline is captured first. "
          "All system changes still pass ProtectionPolicy and SafetyValidator.",
-         "是否应用审核后的编码模式计划？\n\n{0} 项计划操作\n{1} 项受保护负载"
+         "是否应用审核后的编码模式计划？\n\n{0} 项计划操作\n{1} 个清理池进程"
+         "\n{2} 项受保护负载"
          "\n\n将先采集 10 秒基线。所有系统变更仍会通过保护策略与安全校验。"},
+        {"Current Processes", "当前进程"},
+        {"Cleanup Pool", "清理池"},
+        {"Automatic Plan", "自动计划"},
+        {"No automatic actions.", "没有自动操作。"},
+        {"Priority", "优先级"},
+        {"Close application", "关闭应用"},
+        {"Temporary service stop", "临时停止服务"},
+        {"Click an available process to add it to the cleanup pool.",
+         "单击可用进程，将其加入清理池。"},
+        {"Click a selected process to remove it.",
+         "单击已选进程可将其移出。"},
+        {"State", "状态"},
+        {"Selected", "已选择"},
+        {"Ready to add", "可加入"},
+        {"Protection inventory is incomplete", "保护清单不完整"},
+        {"Process identity is unavailable", "进程身份不可用"},
+        {"Protected by policy", "受策略保护"},
+        {"Foreground process", "前台进程"},
+        {"No visible window", "没有可见窗口"},
+        {"Already included in the plan", "已包含在计划中"},
+        {"No process inventory is available.", "没有可用的进程清单。"},
+        {"Showing {0}-{1} of {2}; use the mouse wheel.",
+         "正在显示第 {0}-{1} 个，共 {2} 个；请使用鼠标滚轮。"},
+        {"No processes selected.", "尚未选择进程。"},
+        {"{0} selected; additional entries are below.",
+         "已选择 {0} 个；其余条目在下方。"},
+        {"Process is no longer available.", "该进程已不可用。"},
+        {"Removed from the cleanup pool.", "已移出清理池。"},
+        {"Cleanup pool is full.", "清理池已满。"},
+        {"Added to the cleanup pool.", "已加入清理池。"},
 
         // Coding Mode status and dialogs.
         {"Coding Mode is active.", "编码模式已激活。"},
@@ -174,9 +222,9 @@ const std::pair<const char*, const char*> kChineseTranslations[] = {
         // Tray and export.
         {"Open WorkBoost", "打开 WorkBoost"},
         {"Exit", "退出"},
-        {"WorkBoost is still running. Double-click the tray icon to open the "
+        {"WorkBoost is still running. Click the tray icon to open the "
          "dashboard.",
-         "WorkBoost 仍在运行。双击托盘图标打开仪表盘。"},
+         "WorkBoost 仍在运行。单击托盘图标打开仪表盘。"},
         {"Wait for the first sample before exporting.",
          "请等待首次采样后再导出。"},
         {"Dashboard report exported.", "仪表盘报告已导出。"},
