@@ -28,6 +28,7 @@ enum class DashboardUiAction {
   ProcessSortIo,
   ProcessSortImpact,
   SelectProcess,
+  ToggleCleanupProcess,
 };
 
 struct DashboardUiCommand {
@@ -53,6 +54,12 @@ struct ProcessViewOptions {
   std::string search;
   std::uint32_t selected_pid{};
   bool search_focused{};
+};
+
+struct CodingModeViewOptions {
+  std::vector<ProcessSelection> cleanup_processes;
+  std::size_t process_scroll_offset{};
+  std::size_t pool_scroll_offset{};
 };
 
 // Device-independent geometry for the variable-length System Overview list.
@@ -87,7 +94,8 @@ class DashboardRenderer {
              DashboardPage current_page,
              const std::optional<DashboardUiCommand>& hovered,
              const std::string& status_message,
-             const ProcessViewOptions& process_options = {});
+             const ProcessViewOptions& process_options = {},
+             const CodingModeViewOptions& coding_options = {});
   [[nodiscard]] std::optional<DashboardUiCommand> HitTest(POINT point) const;
 
   // Recreates fonts after the interface language changed (the active locale
@@ -106,7 +114,8 @@ class DashboardRenderer {
                  DashboardPage current_page,
                  const std::optional<DashboardUiCommand>& hovered,
                  const std::string& status_message,
-                 const ProcessViewOptions& process_options);
+                 const ProcessViewOptions& process_options,
+                 const CodingModeViewOptions& coding_options);
   void DrawDashboard(HDC dc, const RECT& content,
                      const DashboardViewModel& model,
                      const std::optional<DashboardUiCommand>& hovered);
@@ -120,6 +129,7 @@ class DashboardRenderer {
                      const DashboardViewModel& model);
   void DrawCodingMode(HDC dc, const RECT& content,
                       const DashboardViewModel& model,
+                      const CodingModeViewOptions& options,
                       const std::optional<DashboardUiCommand>& hovered);
   void DrawRecovery(HDC dc, const RECT& content,
                     const DashboardViewModel& model,

@@ -1,9 +1,11 @@
 #pragma once
 
+#include "core/optimization/optimization.h"
 #include "platform/windows/windows_utils.h"
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace workboost {
 
@@ -26,7 +28,9 @@ struct CodingModeCommandResult {
 class CodingModeCommandClient {
  public:
   static CodingModeCommandResult Execute(CodingModeCommand command,
-                                         int baseline_seconds = 10);
+                                         int baseline_seconds = 10,
+                                         const std::vector<ProcessSelection>&
+                                             cleanup_processes = {});
 };
 
 }  // namespace workboost

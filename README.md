@@ -32,7 +32,8 @@ WorkBoost-0.1.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 - 基于滑动时间窗口的内存、分页、磁盘、HDD 分页、SSD 空间、CPU、Defender 和后台 I/O 诊断；进程归因只使用完整清单，后台“未保护”判断还要求 TCP 清单完整，可缺失清单/磁盘实例必须覆盖至少半个窗口且不少于两个样本。
 - 文本/JSON 诊断报告；Diagnostic Recording 支持 250–500 ms 显式采样周期。
 - Coding Mode 的强类型动作计划、安全校验、逐动作持久化、逆序回滚和崩溃恢复。
-- 显式允许列表中的后台应用可接收 `WM_CLOSE`；不使用 `TerminateProcess`，前台或受保护进程始终拒绝。
+- Coding Mode 显示完整进程列表及 CPU、Working Set、磁盘 I/O；用户可左键加入/移出清理池，进入模式时仅向清理池中的非保护后台窗口发送 `WM_CLOSE`。
+- Profile 显式允许列表中的后台应用也可自动进入 `WM_CLOSE` 计划；两条路径都不使用 `TerminateProcess`，前台或受保护进程始终拒绝。
 - 已知且显式允许的 Updater/CloudSync/VendorUtility 服务可被临时停止；动作要求 Medium 风险确认，并在退出或崩溃恢复时重新启动。
 - `WorkBoostElevated.exe` 按需由 UAC 启动，通过受 ACL 限制的本地 Named Pipe 接收版本化强类型协议；Helper 不接受 Shell 或任意命令文本。
 - 被动观测新启动的 Development 进程，从 Process Start 计时到可见主窗口及窗口响应；支持 Baseline/Optimized 默认各三次的 Median 与 Delta 对比，既不代替用户启动目标，也不修改目标进程。
@@ -111,7 +112,9 @@ workboost recovery restore
 workboost recovery acknowledge
 ```
 
-不带参数运行 `workboost` 会打开 Dashboard；`workboost gui` 与其等价。Dashboard 的 Refresh 只请求新的只读采样，Export all 会把七个页面的当前脱敏视图写入用户选择的本地文本文件。点击标题栏关闭按钮或最小化会把窗口隐藏到系统托盘；左键单击托盘图标恢复面板，右键打开包含“打开”和“退出”的菜单，只有其中的“退出”才会结束进程。若托盘图标注册失败，窗口会保持可见。Coding Mode 页面只显示实时计划预览，系统修改仍通过 CLI 的强类型动作、二次安全校验与会话持久化链路执行。
+不带参数运行 `workboost` 会打开 Dashboard；`workboost gui` 与其等价。Dashboard 的 Refresh 只请求新的只读采样，Export all 会把七个页面的当前脱敏视图写入用户选择的本地文本文件。点击标题栏关闭按钮或最小化会把窗口隐藏到系统托盘；左键单击托盘图标恢复面板，右键打开包含“打开”和“退出”的菜单，只有其中的“退出”才会结束进程。若托盘图标注册失败，窗口会保持可见。
+
+Coding Mode 页面把可选进程排在前面，并显示 CPU、Working Set 与磁盘 I/O。左键单击进程可加入清理池，再次单击可移出；点击“进入 Coding Mode”后，GUI 只把 PID 与进程启动时间作为固定数字参数传给同一可执行文件。CLI 会在 10 秒基线后重新采样，核对 PID/启动时间、可见窗口、前台状态及完整 Process/TCP 保护清单，再由 `ProtectionPolicy -> OptimizationPlanner -> SafetyValidator -> ActionExecutor` 执行。进程重启、变成前台或获得受保护连接都会使动作被拒绝。
 
 Dashboard 的 Top Impact 按可执行文件名聚合并同时列出 CPU、Private Memory 和 Disk I/O，最终等级取三项中的最高等级。CPU 的 Medium/High 边界为 5%/20%，Private Memory 为 512 MiB/2 GiB；I/O 的 Medium/High 边界分别是 `background_io_bytes_per_sec` 的 0.5 倍和 2 倍，默认即 5 MiB/s 与 20 MiB/s。
 
@@ -128,9 +131,9 @@ Dashboard 的 Top Impact 按可执行文件名聚合并同时列出 CPU、Privat
 完整 Process/TCP 清单样本数及两者同时完整的保护样本数。不指定时沿用配置的正常
 监控周期。
 
-进入 Coding Mode 前采集 10–600 秒基线，默认 10 秒。正常退出时会在回滚前采集最多 5 秒 Optimized 证据，再逆序恢复动作并生成 report schema v1 报告。Baseline/Optimized 系统数值聚合整个采样窗口，并记录 `sample_count`、`observed_span_ms` 及 Process/TCP/保护完整样本数，不是只取最后一个快照；Development 与后台 Top I/O 只使用对应完整样本。建议先使用 `--dry-run` 检查计划。执行器只接受三类白名单动作：`SetPriorityClass`（Safe，可逆，目标仅允许 `below_normal`、`normal` 或 `above_normal`）、`GracefulCloseProcess`（Low，必须由 `allow_graceful_close` 显式允许）和 `StopServiceTemporary`（Medium、可逆，必须由 `allow_service_stop` 与 `--confirm-service-actions` 同时允许）。任何动作都必须再次通过 SafetyValidator 和对应 ProtectionPolicy。
+进入 Coding Mode 前采集 10–600 秒基线，默认 10 秒。正常退出时会在回滚前采集最多 5 秒 Optimized 证据，再逆序恢复动作并生成 report schema v1 报告。Baseline/Optimized 系统数值聚合整个采样窗口，并记录 `sample_count`、`observed_span_ms` 及 Process/TCP/保护完整样本数，不是只取最后一个快照；Development 与后台 Top I/O 只使用对应完整样本。建议先使用 `--dry-run` 检查计划。执行器只接受三类白名单动作：`SetPriorityClass`（Safe，可逆，目标仅允许 `below_normal`、`normal` 或 `above_normal`）、`GracefulCloseProcess`（Low，必须来自 `allow_graceful_close` 或用户明确选择的清理池）和 `StopServiceTemporary`（Medium、可逆，必须由 `allow_service_stop` 与 `--confirm-service-actions` 同时允许）。任何动作都必须再次通过 SafetyValidator 和对应 ProtectionPolicy。
 
-Graceful Close 只向目标进程的可见顶层窗口发送 `WM_CLOSE`。应用可以显示“保存更改”提示并继续运行；WorkBoost 不会强制结束进程。多个窗口共享一个总超时预算；若只有部分窗口确认收到请求且进程仍在运行，结果为 `Uncertain`，不会误报 Completed。仓库默认关闭允许列表为空，因此默认配置不会自动关闭任何应用。进程或 TCP 保护清单不完整时，降优先级和 Graceful Close 都会被 Planner 与 SafetyValidator 双重拒绝。
+Graceful Close 只向目标进程的可见顶层窗口发送 `WM_CLOSE`。应用可以显示“保存更改”提示并继续运行；WorkBoost 不会强制结束进程。多个窗口共享一个总超时预算；若只有部分窗口确认收到请求且进程仍在运行，结果为 `Uncertain`，不会误报 Completed。仓库默认关闭允许列表为空，因此默认配置不会自动关闭任何应用；只有用户主动加入清理池才会创建手动关闭动作。Your Phone/Phone Link、Widgets、Game Bar、Windows Settings、Calculator、Notepad、Paint、Snipping Tool 和 Photos 等非核心 Windows 附加应用具有明确的 Optimizable 分类，但仍要求可见后台窗口与用户选择。Explorer、Shell/Search Host、System/Security 和所有未知进程仍保持不可选。进程或 TCP 保护清单不完整时，降优先级和 Graceful Close 都会被 Planner 与 SafetyValidator 双重拒绝。
 
 ## 配置
 

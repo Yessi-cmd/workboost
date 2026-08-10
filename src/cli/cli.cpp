@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -40,6 +41,7 @@ namespace {
 
 constexpr double kMiB = 1024.0 * 1024.0;
 constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
+constexpr std::size_t kMaximumCleanupProcesses = 64;
 
 struct CliOptions {
   bool json{};
@@ -56,6 +58,7 @@ struct CliOptions {
   bool benchmark_label_specified{};
   std::optional<std::filesystem::path> config_directory;
   std::optional<std::filesystem::path> output_path;
+  std::vector<ProcessSelection> cleanup_processes;
 };
 
 void PrintUsage() {
@@ -80,7 +83,8 @@ void PrintUsage() {
          " [--output FILE] [--json]\n"
       << "  workboost profile show coding [--json]\n"
       << "  workboost coding enter [--dry-run] [--confirm-service-actions]"
-         " [--baseline-duration 10..600]\n"
+         " [--baseline-duration 10..600]"
+         " [--close-process PID:START_TIME_100NS ...]\n"
       << "  workboost coding exit\n"
       << "  workboost recovery <status|restore|acknowledge>\n\n"
       << "Global option: --config-dir DIRECTORY\n";
@@ -92,6 +96,41 @@ bool ParsePositiveInt(const std::string& value, int* output) {
     const int parsed = std::stoi(value, &consumed);
     if (consumed != value.size() || parsed < 0) return false;
     *output = parsed;
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+bool ParseProcessSelection(const std::string& value,
+                           ProcessSelection* output) {
+  const std::size_t separator = value.find(':');
+  if (separator == std::string::npos || separator == 0 ||
+      separator + 1 >= value.size() ||
+      value.find(':', separator + 1) != std::string::npos) {
+    return false;
+  }
+  if (!std::all_of(value.begin(), value.end(), [](char character) {
+        return character == ':' || (character >= '0' && character <= '9');
+      }) ||
+      value[separator] != ':') {
+    return false;
+  }
+  try {
+    std::size_t pid_consumed = 0;
+    std::size_t time_consumed = 0;
+    const auto pid = std::stoull(value.substr(0, separator), &pid_consumed);
+    const std::string start_time = value.substr(separator + 1);
+    const auto parsed_start_time =
+        std::stoull(start_time, &time_consumed);
+    if (pid_consumed != separator || time_consumed != start_time.size() ||
+        pid == 0 ||
+        pid > std::numeric_limits<std::uint32_t>::max() ||
+        parsed_start_time == 0) {
+      return false;
+    }
+    output->pid = static_cast<std::uint32_t>(pid);
+    output->expected_start_time_100ns = parsed_start_time;
     return true;
   } catch (...) {
     return false;
@@ -111,6 +150,27 @@ bool ParseOptions(const std::vector<std::string>& input,
       options->dry_run = true;
     } else if (value == "--confirm-service-actions") {
       options->confirm_service_actions = true;
+    } else if (value == "--close-process") {
+      if (++i >= input.size()) {
+        *error = value + " requires PID:START_TIME_100NS";
+        return false;
+      }
+      ProcessSelection selection;
+      if (!ParseProcessSelection(input[i], &selection)) {
+        *error = value + " requires PID:START_TIME_100NS using positive "
+                         "decimal integers";
+        return false;
+      }
+      if (std::find(options->cleanup_processes.begin(),
+                    options->cleanup_processes.end(),
+                    selection) == options->cleanup_processes.end()) {
+        if (options->cleanup_processes.size() >=
+            kMaximumCleanupProcesses) {
+          *error = "at most 64 --close-process selections are allowed";
+          return false;
+        }
+        options->cleanup_processes.push_back(selection);
+      }
     } else if (value == "--limit" || value == "--duration" ||
                value == "--interval" ||
                value == "--runs" || value == "--label" ||
@@ -1134,7 +1194,8 @@ int EnterCodingMode(const Config& config, const CliOptions& options,
               << '\n';
     return 1;
   }
-  auto plan = OptimizationPlanner(config).Create(planning_snapshot);
+  auto plan = OptimizationPlanner(config).Create(
+      planning_snapshot, options.cleanup_processes);
   const std::size_t safe_actions = static_cast<std::size_t>(std::count_if(
       plan.actions.begin(), plan.actions.end(), [](const auto& action) {
         return action.risk == ActionRisk::Safe;
@@ -1478,6 +1539,12 @@ int RunCli(int argc, char* argv[]) {
   if (!ParseOptions(raw, &positional, &options, &error)) {
     std::cerr << error << "\n\n";
     PrintUsage();
+    return 64;
+  }
+  if (!options.cleanup_processes.empty() &&
+      (positional.size() != 2 || positional[0] != "coding" ||
+       positional[1] != "enter")) {
+    std::cerr << "--close-process is only valid with 'coding enter'.\n";
     return 64;
   }
   // The dashboard detaches from the console so it keeps running without a

@@ -26,6 +26,18 @@
     { "name": "python.exe", "class": "BuildTool", "protection": "Strong" },
     { "name": "wsl.exe", "class": "BuildTool", "protection": "Strong" },
     { "name": "msmpeng.exe", "class": "Security", "protection": "SystemCritical" },
-    { "name": "searchindexer.exe", "class": "System", "protection": "SystemCritical" }
+    { "name": "searchindexer.exe", "class": "System", "protection": "SystemCritical" },
+    { "name": "yourphone.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "phoneexperiencehost.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "widgets.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "gamebar.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "gamebarftserver.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "xboxgamebarwidgets.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "systemsettings.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "calculatorapp.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "notepad.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "mspaint.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "snippingtool.exe", "class": "VendorUtility", "protection": "Optimizable" },
+    { "name": "microsoft.photos.exe", "class": "VendorUtility", "protection": "Optimizable" }
   ]
 }

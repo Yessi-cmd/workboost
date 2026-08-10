@@ -254,6 +254,9 @@ class DashboardWindow {
       case WM_LBUTTONUP:
         HandleClick(lparam);
         return 0;
+      case WM_MOUSEWHEEL:
+        HandleMouseWheel(wparam, lparam);
+        return 0;
       case WM_KEYDOWN:
         HandleKeyDown(wparam);
         return 0;
@@ -311,7 +314,10 @@ class DashboardWindow {
     RECT client{};
     GetClientRect(window_, &client);
     renderer_.Paint(dc, client, latest_model_, current_page_, hovered_,
-                    status_message_);
+                    status_message_, {},
+                    CodingModeViewOptions{cleanup_processes_,
+                                          cleanup_process_scroll_offset_,
+                                          cleanup_pool_scroll_offset_});
     EndPaint(window_, &paint);
   }
 
@@ -385,11 +391,13 @@ class DashboardWindow {
           confirmation
               << Locale::Format(
                      "Apply the reviewed Coding Mode plan?\n\n{0} planned "
-                     "action(s)\n{1} protected workload(s)\n\nA 10-second "
+                     "action(s)\n{1} cleanup process(es)\n{2} protected "
+                     "workload(s)\n\nA 10-second "
                      "baseline is captured first. All system changes still "
                      "pass ProtectionPolicy and SafetyValidator.",
                      {std::to_string(
                           latest_model_->coding_mode.planned_actions),
+                      std::to_string(cleanup_processes_.size()),
                       std::to_string(
                           latest_model_->coding_mode.protected_workloads)});
           const int answer = MessageBoxW(
@@ -405,9 +413,93 @@ class DashboardWindow {
           StartCodingCommand(CodingModeCommand::Restore);
         }
         break;
+      case DashboardUiAction::ToggleCleanupProcess:
+        ToggleCleanupProcess(command->value);
+        break;
+      case DashboardUiAction::FocusProcessSearch:
+      case DashboardUiAction::ProcessFilterAll:
+      case DashboardUiAction::ProcessFilterHighImpact:
+      case DashboardUiAction::ProcessFilterProtected:
+      case DashboardUiAction::ProcessSortCpu:
+      case DashboardUiAction::ProcessSortMemory:
+      case DashboardUiAction::ProcessSortIo:
+      case DashboardUiAction::ProcessSortImpact:
+      case DashboardUiAction::SelectProcess:
+        break;
       case DashboardUiAction::None: break;
     }
     InvalidateRect(window_, nullptr, FALSE);
+  }
+
+  void HandleMouseWheel(WPARAM wparam, LPARAM lparam) {
+    if (current_page_ != DashboardPage::CodingMode || !latest_model_ ||
+        latest_model_->coding_mode.active ||
+        latest_model_->coding_mode.safe_mode ||
+        latest_model_->coding_mode.operation_in_progress) {
+      return;
+    }
+    const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+    POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    ScreenToClient(window_, &point);
+    RECT client{};
+    GetClientRect(window_, &client);
+    const bool over_cleanup_pool = point.x > client.right * 7 / 10;
+    std::size_t* offset = over_cleanup_pool
+                              ? &cleanup_pool_scroll_offset_
+                              : &cleanup_process_scroll_offset_;
+    const std::size_t item_count = over_cleanup_pool
+                                       ? cleanup_processes_.size()
+                                       : latest_model_->processes.size();
+    if (delta > 0) {
+      *offset = *offset > 3 ? *offset - 3 : 0;
+    } else if (delta < 0) {
+      *offset = std::min(*offset + 3,
+                         item_count == 0 ? std::size_t{0} : item_count - 1);
+    }
+    InvalidateRect(window_, nullptr, FALSE);
+  }
+
+  void ToggleCleanupProcess(std::uint32_t pid) {
+    if (!latest_model_ || latest_model_->coding_mode.active ||
+        latest_model_->coding_mode.safe_mode ||
+        latest_model_->coding_mode.operation_in_progress) {
+      return;
+    }
+    const auto process = std::find_if(
+        latest_model_->processes.begin(), latest_model_->processes.end(),
+        [pid](const ProcessViewModel& candidate) {
+          return candidate.pid == pid;
+        });
+    if (process == latest_model_->processes.end()) {
+      status_message_ = Locale::Get("Process is no longer available.");
+      return;
+    }
+    const ProcessSelection selection{process->pid,
+                                     process->start_time_100ns};
+    const auto selected = std::find(cleanup_processes_.begin(),
+                                    cleanup_processes_.end(), selection);
+    if (selected != cleanup_processes_.end()) {
+      cleanup_processes_.erase(selected);
+      cleanup_pool_scroll_offset_ = std::min(
+          cleanup_pool_scroll_offset_,
+          cleanup_processes_.empty() ? std::size_t{0}
+                                     : cleanup_processes_.size() - 1);
+      status_message_ = Locale::Get("Removed from the cleanup pool.");
+      return;
+    }
+    if (!process->cleanup_eligible) {
+      status_message_ = Locale::Get(process->cleanup_block_reason);
+      return;
+    }
+    if (cleanup_processes_.size() >= 64) {
+      status_message_ = Locale::Get("Cleanup pool is full.");
+      return;
+    }
+    cleanup_processes_.push_back(selection);
+    cleanup_pool_scroll_offset_ = cleanup_processes_.size() > 1
+                                      ? cleanup_processes_.size() - 1
+                                      : 0;
+    status_message_ = Locale::Get("Added to the cleanup pool.");
   }
 
   void HandleKeyDown(WPARAM key) {
@@ -438,10 +530,39 @@ class DashboardWindow {
     }
     if (model) {
       ApplyCodingOperationState(&*model);
+      ReconcileCleanupProcesses(*model);
       latest_model_ = std::move(model);
       if (!coding_command_running_.load()) status_message_.clear();
       InvalidateRect(window_, nullptr, FALSE);
     }
+  }
+
+  void ReconcileCleanupProcesses(const DashboardViewModel& model) {
+    cleanup_processes_.erase(
+        std::remove_if(
+            cleanup_processes_.begin(), cleanup_processes_.end(),
+            [&model](const ProcessSelection& selection) {
+              const auto process = std::find_if(
+                  model.processes.begin(), model.processes.end(),
+                  [&selection](const ProcessViewModel& candidate) {
+                    return candidate.pid == selection.pid &&
+                           candidate.start_time_100ns ==
+                               selection.expected_start_time_100ns;
+                  });
+              return process == model.processes.end() ||
+                     !process->cleanup_eligible;
+            }),
+        cleanup_processes_.end());
+    if (model.processes.empty()) {
+      cleanup_process_scroll_offset_ = 0;
+    } else {
+      cleanup_process_scroll_offset_ = std::min(
+          cleanup_process_scroll_offset_, model.processes.size() - 1);
+    }
+    cleanup_pool_scroll_offset_ = std::min(
+        cleanup_pool_scroll_offset_,
+        cleanup_processes_.empty() ? std::size_t{0}
+                                   : cleanup_processes_.size() - 1);
   }
 
   void ApplyCodingOperationState(DashboardViewModel* model) const {
@@ -474,11 +595,16 @@ class DashboardWindow {
     if (latest_model_) ApplyCodingOperationState(&*latest_model_);
     InvalidateRect(window_, nullptr, FALSE);
 
+    const std::vector<ProcessSelection> cleanup_processes =
+        command == CodingModeCommand::Enter
+            ? cleanup_processes_
+            : std::vector<ProcessSelection>{};
     try {
-      coding_worker_ = std::thread([this, command] {
+      coding_worker_ = std::thread([this, command, cleanup_processes] {
         CodingModeCommandResult result;
         try {
-          result = CodingModeCommandClient::Execute(command);
+          result = CodingModeCommandClient::Execute(command, 10,
+                                                    cleanup_processes);
         } catch (const std::exception& error) {
           result.error.code = ERROR_UNHANDLED_EXCEPTION;
           result.error.context = "Execute Coding Mode command";
@@ -521,6 +647,10 @@ class DashboardWindow {
 
     if (result->Succeeded()) {
       const bool entered = active_coding_command_ == CodingModeCommand::Enter;
+      if (entered) {
+        cleanup_processes_.clear();
+        cleanup_pool_scroll_offset_ = 0;
+      }
       status_message_ = entered
                             ? Locale::Get("Coding Mode is active.")
                             : Locale::Get("System state was restored "
@@ -879,6 +1009,9 @@ class DashboardWindow {
   std::optional<CodingModeCommandResult> pending_coding_result_;
   CodingModeCommand active_coding_command_{CodingModeCommand::Enter};
   std::string coding_operation_status_;
+  std::vector<ProcessSelection> cleanup_processes_;
+  std::size_t cleanup_process_scroll_offset_{};
+  std::size_t cleanup_pool_scroll_offset_{};
   NOTIFYICONDATAW tray_icon_{};
   bool tray_icon_added_{};
   bool tray_tip_shown_{};

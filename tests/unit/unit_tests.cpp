@@ -24,6 +24,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -1146,6 +1147,180 @@ void TestDashboardPresenter() {
         "dashboard must mask remote IP addresses by default");
 }
 
+void TestDashboardCleanupEligibility() {
+  Config config = Config::Defaults();
+  SystemSnapshot snapshot;
+  snapshot.timestamp = std::chrono::system_clock::now();
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  ProcessSnapshot companion;
+  companion.pid = 301;
+  companion.name = "PhoneExperienceHost.exe";
+  companion.start_time_100ns = 3001;
+  companion.has_visible_window = true;
+  const auto rule = config.RuleFor(companion.name);
+  companion.classification = rule.process_class;
+  companion.protection_level = rule.protection;
+  snapshot.processes.push_back(companion);
+
+  ProcessSnapshot unknown = companion;
+  unknown.pid = 302;
+  unknown.name = "UnknownNativeHost.exe";
+  unknown.start_time_100ns = 3002;
+  unknown.classification = ProcessClass::Unknown;
+  unknown.protection_level = ProtectionLevel::Strong;
+  snapshot.processes.push_back(unknown);
+
+  SnapshotHistory history(2);
+  history.Add(snapshot);
+  const auto model = workboost::gui::DashboardPresenter::Build(
+      config, snapshot, history, {}, {}, std::nullopt, "");
+  const auto companion_view = std::find_if(
+      model.processes.begin(), model.processes.end(),
+      [](const workboost::gui::ProcessViewModel& process) {
+        return process.pid == 301;
+      });
+  const auto unknown_view = std::find_if(
+      model.processes.begin(), model.processes.end(),
+      [](const workboost::gui::ProcessViewModel& process) {
+        return process.pid == 302;
+      });
+  Check(companion_view != model.processes.end() &&
+            companion_view->cleanup_eligible &&
+            companion_view->cleanup_block_reason == "Ready to add",
+        "an optional visible Windows app should be available to select");
+  Check(unknown_view != model.processes.end() &&
+            !unknown_view->cleanup_eligible &&
+            unknown_view->cleanup_block_reason == "Protected by policy",
+        "an unknown process should be visible but unavailable to select");
+}
+
+void TestCodingModeCleanupRenderer() {
+  HWND window = CreateWindowExW(0, L"STATIC", L"WorkBoost cleanup test",
+                                WS_POPUP, 0, 0, 32, 32, nullptr, nullptr,
+                                GetModuleHandleW(nullptr), nullptr);
+  Check(window != nullptr, "cleanup renderer test window should be created");
+  struct Cleanup {
+    HWND window;
+    ~Cleanup() {
+      if (window != nullptr) DestroyWindow(window);
+    }
+  } cleanup{window};
+
+  workboost::gui::DashboardRenderer renderer;
+  Check(renderer.Initialize(window),
+        "cleanup renderer should initialize");
+  HDC dc = GetDC(window);
+  Check(dc != nullptr, "cleanup renderer device context should be available");
+  const int dpi = std::max(96, GetDeviceCaps(dc, LOGPIXELSX));
+  const RECT bounds{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
+  workboost::gui::DashboardViewModel model;
+  model.mode = "Monitor Mode";
+  workboost::gui::ProcessViewModel process;
+  process.pid = 301;
+  process.start_time_100ns = 3001;
+  process.name = "PhoneExperienceHost.exe";
+  process.cpu_percent = 1.5;
+  process.working_set_bytes = 64ULL * 1024 * 1024;
+  process.read_bytes_per_sec = 1024;
+  process.cleanup_eligible = true;
+  process.cleanup_block_reason = "Ready to add";
+  model.processes.push_back(process);
+  const std::optional<workboost::gui::DashboardViewModel> optional_model{model};
+
+  renderer.Paint(dc, bounds, optional_model,
+                 workboost::gui::DashboardPage::CodingMode, std::nullopt, "",
+                 {}, {});
+  const POINT process_row{MulDiv(300, dpi, 96), MulDiv(380, dpi, 96)};
+  const auto add = renderer.HitTest(process_row);
+  Check(add && add->action ==
+                   workboost::gui::DashboardUiAction::ToggleCleanupProcess &&
+            add->value == process.pid,
+        "Coding Mode process rows must expose cleanup selection targets");
+
+  workboost::gui::CodingModeViewOptions options;
+  options.cleanup_processes.push_back(
+      workboost::ProcessSelection{process.pid, process.start_time_100ns});
+  renderer.Paint(dc, bounds, optional_model,
+                 workboost::gui::DashboardPage::CodingMode, std::nullopt, "",
+                 {}, options);
+  const POINT pool_row{MulDiv(960, dpi, 96), MulDiv(360, dpi, 96)};
+  const auto remove = renderer.HitTest(pool_row);
+  ReleaseDC(window, dc);
+  Check(remove && remove->action ==
+                      workboost::gui::DashboardUiAction::ToggleCleanupProcess &&
+            remove->value == process.pid,
+        "cleanup pool rows must expose removal targets");
+}
+
+void TestExplicitCleanupPoolPlanning() {
+  Config config = Config::Defaults();
+  const auto optional_rule = config.RuleFor("PhoneExperienceHost.exe");
+  Check(optional_rule.process_class == ProcessClass::VendorUtility &&
+            optional_rule.protection == ProtectionLevel::Optimizable,
+        "optional Windows companion apps should be explicitly classified");
+
+  ProcessSnapshot companion;
+  companion.pid = 22;
+  companion.name = "PhoneExperienceHost.exe";
+  companion.start_time_100ns = 790;
+  companion.priority_class = NORMAL_PRIORITY_CLASS;
+  companion.classification = optional_rule.process_class;
+  companion.protection_level = optional_rule.protection;
+  companion.has_visible_window = true;
+  SystemSnapshot snapshot;
+  snapshot.processes = {companion};
+  snapshot.process_inventory_complete = true;
+  snapshot.tcp_inventory_complete = true;
+
+  const workboost::ProcessSelection selection{companion.pid,
+                                               companion.start_time_100ns};
+  const auto plan = OptimizationPlanner(config).Create(snapshot, {selection});
+  Check(plan.actions.size() == 1 &&
+            plan.actions[0].type == ActionType::GracefulCloseProcess &&
+            plan.actions[0].explicit_confirmation &&
+            plan.actions[0].process_name == companion.name,
+        "a user-selected optional app should create one confirmed close");
+  std::string reason;
+  Check(SafetyValidator(config).Validate(plan.actions[0], snapshot, &reason),
+        "the validator should accept the same live, unprotected identity");
+
+  const auto wrong_identity = OptimizationPlanner(config).Create(
+      snapshot,
+      {workboost::ProcessSelection{companion.pid,
+                                   companion.start_time_100ns + 1}});
+  Check(wrong_identity.actions.empty(),
+        "a reused or restarted PID must be rejected from the cleanup pool");
+
+  snapshot.processes[0].is_foreground = true;
+  Check(OptimizationPlanner(config).Create(snapshot, {selection})
+            .actions.empty(),
+        "a selected process that becomes foreground must be rejected");
+  snapshot.processes[0].is_foreground = false;
+  snapshot.tcp_sessions.push_back(
+      TcpSession{companion.pid, "127.0.0.1", 50002, "10.0.0.3", 22,
+                 TcpState::Established, false});
+  Check(OptimizationPlanner(config).Create(snapshot, {selection})
+            .actions.empty(),
+        "an active protected remote session must override manual selection");
+
+  ProcessSnapshot unknown = companion;
+  unknown.pid = 23;
+  unknown.name = "UnknownNativeHost.exe";
+  unknown.start_time_100ns = 791;
+  unknown.classification = ProcessClass::Unknown;
+  unknown.protection_level = ProtectionLevel::Strong;
+  snapshot.processes = {unknown};
+  snapshot.tcp_sessions.clear();
+  Check(OptimizationPlanner(config)
+            .Create(snapshot,
+                    {workboost::ProcessSelection{unknown.pid,
+                                                 unknown.start_time_100ns}})
+            .actions.empty(),
+        "unknown processes must stay fail-closed even when selected");
+}
+
 void TestDashboardTopImpactMetrics() {
   Config config = Config::Defaults();
   SystemSnapshot snapshot;
@@ -1364,6 +1539,21 @@ void TestCodingModeCommandValidation() {
   Check(!above_maximum.launched &&
             above_maximum.error.code == ERROR_INVALID_PARAMETER,
         "oversized Coding Mode baseline must fail before launching a process");
+
+  const auto invalid_selection =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::Enter, 10,
+          {workboost::ProcessSelection{0, 1}});
+  Check(!invalid_selection.launched &&
+            invalid_selection.error.code == ERROR_INVALID_PARAMETER,
+        "an invalid cleanup identity must fail before process launch");
+  const auto selection_on_exit =
+      workboost::CodingModeCommandClient::Execute(
+          workboost::CodingModeCommand::Exit, 10,
+          {workboost::ProcessSelection{1, 1}});
+  Check(!selection_on_exit.launched &&
+            selection_on_exit.error.code == ERROR_INVALID_PARAMETER,
+        "cleanup selections must only be accepted by Coding Mode enter");
 }
 
 void TestCompletionReport() {
@@ -1744,6 +1934,7 @@ void TestSessionRoundTrip() {
   close.action.expected_start_time_100ns = 100;
   close.action.process_name = "ExampleUpdater.exe";
   close.action.timeout_ms = 1500;
+  close.action.explicit_confirmation = true;
   close.action.reason = "explicit close test";
   close.state = ActionState::Uncertain;
   close.error_code = ERROR_NOT_SUPPORTED;
@@ -1796,6 +1987,7 @@ void TestSessionRoundTrip() {
   Check(parsed->actions[1].action.type == ActionType::GracefulCloseProcess &&
             parsed->actions[1].action.risk == ActionRisk::Low &&
             parsed->actions[1].action.timeout_ms == 1500 &&
+            parsed->actions[1].action.explicit_confirmation &&
             parsed->actions[1].state == ActionState::Uncertain &&
             parsed->actions[1].result_message == close.result_message,
         "one-shot recovery metadata must round-trip");
@@ -1992,6 +2184,9 @@ void TestLocale() {
         "Chinese locale must translate known keys");
   Check(Locale::Get("Commit") == "提交内存",
         "Chinese locale must clarify the committed-memory metric");
+  Check(Locale::Get("Cleanup Pool") == "清理池" &&
+            Locale::Get("Protected by policy") == "受策略保护",
+        "Chinese locale must translate cleanup selection states");
   Check(!Locale::Get("Settings").empty(),
         "Chinese settings label must be non-empty");
   Check(Locale::Format("{0} planned changes", {"5"}) == "5 项计划变更",
@@ -2064,6 +2259,7 @@ int main() {
       {"safety validator", TestSafetyValidator},
       {"graceful close planning and protection",
        TestGracefulClosePlanningAndProtection},
+      {"explicit cleanup pool planning", TestExplicitCleanupPoolPlanning},
       {"service protection policy", TestServiceProtectionPolicy},
       {"service action planning and validation",
        TestServiceActionPlanningAndValidation},
@@ -2086,6 +2282,8 @@ int main() {
       {"passive startup benchmark timeout",
        TestPassiveStartupBenchmarkTimeout},
       {"dashboard presenter", TestDashboardPresenter},
+      {"dashboard cleanup eligibility", TestDashboardCleanupEligibility},
+      {"Coding Mode cleanup renderer", TestCodingModeCleanupRenderer},
       {"dashboard Top Impact metrics", TestDashboardTopImpactMetrics},
       {"dashboard overview responsive layout", TestDashboardOverviewLayout},
       {"dashboard close behavior", TestDashboardCloseBehavior},

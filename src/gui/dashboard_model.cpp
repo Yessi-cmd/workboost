@@ -14,6 +14,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -723,12 +724,18 @@ DashboardViewModel DashboardPresenter::Build(
         return left.name < right.name;
       });
   const auto sorted_processes = SortedProcesses(snapshot);
-  const std::size_t process_count =
-      std::min<std::size_t>(200, sorted_processes.size());
+  std::unordered_set<std::uint32_t> planned_close_pids;
+  for (const auto& action : plan.actions) {
+    if (action.type == ActionType::GracefulCloseProcess) {
+      planned_close_pids.insert(action.pid);
+    }
+  }
+  const std::size_t process_count = sorted_processes.size();
   for (std::size_t i = 0; i < process_count; ++i) {
     const auto& process = *sorted_processes[i];
     ProcessViewModel view;
     view.pid = process.pid;
+    view.start_time_100ns = process.start_time_100ns;
     view.name = process.name;
     view.cpu_percent = process.cpu_percent;
     view.working_set_bytes = process.working_set_bytes;
@@ -739,6 +746,27 @@ DashboardViewModel DashboardPresenter::Build(
     view.protection = ToString(policy.Evaluate(process, context));
     view.impact = ProcessImpact(config, process);
     view.protected_workload = policy.IsProtected(process, context);
+    view.has_visible_window = process.has_visible_window;
+    view.is_foreground = process.is_foreground;
+    view.cleanup_already_planned =
+        planned_close_pids.count(process.pid) != 0;
+    if (!snapshot.process_inventory_complete ||
+        !snapshot.tcp_inventory_complete) {
+      view.cleanup_block_reason = "Protection inventory is incomplete";
+    } else if (process.start_time_100ns == 0) {
+      view.cleanup_block_reason = "Process identity is unavailable";
+    } else if (view.protected_workload) {
+      view.cleanup_block_reason = "Protected by policy";
+    } else if (process.is_foreground) {
+      view.cleanup_block_reason = "Foreground process";
+    } else if (!process.has_visible_window) {
+      view.cleanup_block_reason = "No visible window";
+    } else if (view.cleanup_already_planned) {
+      view.cleanup_block_reason = "Already included in the plan";
+    } else {
+      view.cleanup_eligible = true;
+      view.cleanup_block_reason = "Ready to add";
+    }
     model.processes.push_back(std::move(view));
 
     if (!IsDeveloperWorkload(process.classification) &&

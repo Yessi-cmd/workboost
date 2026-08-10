@@ -462,6 +462,15 @@ Config Config::Defaults() {
     AddRule(&config, name, ProcessClass::CloudSync,
             ProtectionLevel::Optimizable);
   }
+  for (const char* name : {"yourphone.exe", "phoneexperiencehost.exe",
+                           "widgets.exe", "gamebar.exe",
+                           "gamebarftserver.exe",
+                           "xboxgamebarwidgets.exe", "systemsettings.exe",
+                           "calculatorapp.exe", "notepad.exe", "mspaint.exe",
+                           "snippingtool.exe", "microsoft.photos.exe"}) {
+    AddRule(&config, name, ProcessClass::VendorUtility,
+            ProtectionLevel::Optimizable);
+  }
   for (const char* name : {"searchindexer.exe"}) {
     AddRule(&config, name, ProcessClass::System,
             ProtectionLevel::SystemCritical);

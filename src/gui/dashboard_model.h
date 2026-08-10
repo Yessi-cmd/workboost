@@ -63,6 +63,7 @@ struct DiagnosisViewModel {
 
 struct ProcessViewModel {
   std::uint32_t pid{};
+  std::uint64_t start_time_100ns{};
   std::string name;
   double cpu_percent{};
   std::uint64_t working_set_bytes{};
@@ -73,6 +74,11 @@ struct ProcessViewModel {
   std::string protection;
   ImpactLevel impact{ImpactLevel::Low};
   bool protected_workload{};
+  bool has_visible_window{};
+  bool is_foreground{};
+  bool cleanup_eligible{};
+  bool cleanup_already_planned{};
+  std::string cleanup_block_reason;
 };
 
 struct TopImpactViewModel {

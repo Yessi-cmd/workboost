@@ -350,7 +350,8 @@ void DashboardRenderer::Paint(
     const std::optional<DashboardViewModel>& model, DashboardPage current_page,
     const std::optional<DashboardUiCommand>& hovered,
     const std::string& status_message,
-    const ProcessViewOptions& process_options) {
+    const ProcessViewOptions& process_options,
+    const CodingModeViewOptions& coding_options) {
   hit_targets_.clear();
   const int width = Width(client);
   const int height = Height(client);
@@ -361,13 +362,13 @@ void DashboardRenderer::Paint(
     if (bitmap != nullptr) DeleteObject(bitmap);
     if (buffer != nullptr) DeleteDC(buffer);
     DrawFrame(target, client, model, current_page, hovered, status_message,
-              process_options);
+              process_options, coding_options);
     return;
   }
   {
     SelectScope select(buffer, bitmap);
     DrawFrame(buffer, client, model, current_page, hovered, status_message,
-              process_options);
+              process_options, coding_options);
     BitBlt(target, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
   }
   DeleteObject(bitmap);
@@ -379,7 +380,8 @@ void DashboardRenderer::DrawFrame(
     const std::optional<DashboardViewModel>& model, DashboardPage current_page,
     const std::optional<DashboardUiCommand>& hovered,
     const std::string& status_message,
-    const ProcessViewOptions& process_options) {
+    const ProcessViewOptions& process_options,
+    const CodingModeViewOptions& coding_options) {
   Fill(dc, client, kWindowBackground);
   const int sidebar_width = Scale(200);
   const int header_height = Scale(72);
@@ -533,7 +535,7 @@ void DashboardRenderer::DrawFrame(
       DrawProtected(dc, content, *model);
       break;
     case DashboardPage::CodingMode:
-      DrawCodingMode(dc, content, *model, hovered);
+      DrawCodingMode(dc, content, *model, coding_options, hovered);
       break;
     case DashboardPage::Recovery:
       DrawRecovery(dc, content, *model, hovered);
@@ -1379,6 +1381,7 @@ void DashboardRenderer::DrawProtected(HDC dc, const RECT& content,
 
 void DashboardRenderer::DrawCodingMode(
     HDC dc, const RECT& content, const DashboardViewModel& model,
+    const CodingModeViewOptions& options,
     const std::optional<DashboardUiCommand>& hovered) {
   const int margin = Scale(20);
   const RECT summary =
@@ -1406,6 +1409,9 @@ void DashboardRenderer::DrawCodingMode(
   const std::string counts =
       Locale::Format("{0} planned changes",
                      {std::to_string(model.coding_mode.planned_actions)}) +
+      "   ·   " +
+      Locale::Format("{0} cleanup selections",
+                     {std::to_string(options.cleanup_processes.size())}) +
       "   ·   " +
       Locale::Format("{0} protected workloads",
                      {std::to_string(model.coding_mode.protected_workloads)});
@@ -1442,18 +1448,304 @@ void DashboardRenderer::DrawCodingMode(
   const RECT details =
       MakeRect(content.left, summary.bottom + Scale(16), content.right,
                content.bottom);
-  RoundedRectangle(dc, details, kSurface, kBorder, Scale(7));
-  DrawUtf8(dc, section_font_, kPrimaryText,
-           Locale::Get(model.coding_mode.active ? "Active Changes"
-                                                : "Plan Preview"),
-           MakeRect(details.left + margin, details.top + Scale(12),
-                    details.right - margin, details.top + Scale(42)),
+  if (model.coding_mode.active || model.coding_mode.safe_mode ||
+      model.coding_mode.operation_in_progress) {
+    RoundedRectangle(dc, details, kSurface, kBorder, Scale(7));
+    DrawUtf8(dc, section_font_, kPrimaryText,
+             Locale::Get(model.coding_mode.active ? "Active Changes"
+                                                  : "Plan Preview"),
+             MakeRect(details.left + margin, details.top + Scale(12),
+                      details.right - margin, details.top + Scale(42)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextPage(dc,
+                 MakeRect(details.left + margin, details.top + Scale(48),
+                          details.right - margin, details.bottom - margin),
+                 model.pages[static_cast<std::size_t>(
+                     DashboardPage::CodingMode)]);
+    return;
+  }
+
+  const int gap = Scale(14);
+  const int left_width =
+      std::max(Scale(560), static_cast<int>(Width(details) * 0.66));
+  const RECT process_panel = MakeRect(
+      details.left, details.top,
+      std::min(details.right - Scale(280), details.left + left_width),
+      details.bottom);
+  const RECT pool_panel = MakeRect(process_panel.right + gap, details.top,
+                                   details.right, details.bottom);
+  RoundedRectangle(dc, process_panel, kSurface, kBorder, Scale(7));
+  RoundedRectangle(dc, pool_panel, kSurface, kBorder, Scale(7));
+
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Current Processes"),
+           MakeRect(process_panel.left + margin,
+                    process_panel.top + Scale(10),
+                    process_panel.right - margin,
+                    process_panel.top + Scale(38)),
            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-  DrawTextPage(dc,
-               MakeRect(details.left + margin, details.top + Scale(48),
-                        details.right - margin, details.bottom - margin),
-               model.pages[static_cast<std::size_t>(
-                   DashboardPage::CodingMode)]);
+  DrawUtf8(dc, small_font_, kSecondaryText,
+           Locale::Get(
+               "Click an available process to add it to the cleanup pool."),
+           MakeRect(process_panel.left + margin,
+                    process_panel.top + Scale(38),
+                    process_panel.right - margin,
+                    process_panel.top + Scale(62)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+  const int process_header_y = process_panel.top + Scale(66);
+  Fill(dc,
+       MakeRect(process_panel.left + Scale(1), process_header_y,
+                process_panel.right - Scale(1), process_header_y + Scale(30)),
+       RGB(248, 249, 251));
+  const int process_usable = Width(process_panel) - margin * 2;
+  const std::array<int, 6> columns{
+      process_panel.left + margin,
+      process_panel.left + margin + static_cast<int>(process_usable * 0.35),
+      process_panel.left + margin + static_cast<int>(process_usable * 0.48),
+      process_panel.left + margin + static_cast<int>(process_usable * 0.66),
+      process_panel.left + margin + static_cast<int>(process_usable * 0.84),
+      process_panel.right - margin};
+  const std::array<const char*, 5> labels{"Name", "CPU", "Memory",
+                                          "Disk I/O", "State"};
+  for (std::size_t index = 0; index < labels.size(); ++index) {
+    DrawUtf8(dc, small_font_, kMutedText, Locale::Get(labels[index]),
+             MakeRect(columns[index], process_header_y,
+                      columns[index + 1] - Scale(6),
+                      process_header_y + Scale(30)),
+             index == 0 ? DT_LEFT | DT_VCENTER | DT_SINGLELINE
+                        : DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+  }
+
+  const auto is_selected = [&options](const ProcessViewModel& process) {
+    return std::any_of(
+        options.cleanup_processes.begin(), options.cleanup_processes.end(),
+        [&process](const ProcessSelection& selected) {
+          return selected.pid == process.pid &&
+                 selected.expected_start_time_100ns ==
+                     process.start_time_100ns;
+        });
+  };
+  std::vector<const ProcessViewModel*> coding_processes;
+  coding_processes.reserve(model.processes.size());
+  for (const auto& process : model.processes) {
+    coding_processes.push_back(&process);
+  }
+  std::stable_sort(
+      coding_processes.begin(), coding_processes.end(),
+      [&is_selected](const ProcessViewModel* left,
+                     const ProcessViewModel* right) {
+        const int left_rank = is_selected(*left)
+                                  ? 0
+                                  : left->cleanup_eligible ? 1 : 2;
+        const int right_rank = is_selected(*right)
+                                   ? 0
+                                   : right->cleanup_eligible ? 1 : 2;
+        return left_rank < right_rank;
+      });
+  const int process_row_height = Scale(40);
+  int process_y = process_header_y + Scale(30);
+  const std::size_t process_capacity = static_cast<std::size_t>(std::max(
+      0L,
+      (process_panel.bottom - process_y - Scale(28)) / process_row_height));
+  const std::size_t maximum_offset =
+      coding_processes.size() > process_capacity
+          ? coding_processes.size() - process_capacity
+          : 0;
+  const std::size_t offset =
+      std::min(options.process_scroll_offset, maximum_offset);
+  const std::size_t process_end =
+      std::min(coding_processes.size(), offset + process_capacity);
+  for (std::size_t index = offset; index < process_end; ++index) {
+    const auto& process = *coding_processes[index];
+    const bool selected = is_selected(process);
+    const DashboardUiCommand row_command{
+        DashboardUiAction::ToggleCleanupProcess, DashboardPage::CodingMode,
+        process.pid};
+    const RECT row = MakeRect(process_panel.left + Scale(1), process_y,
+                              process_panel.right - Scale(1),
+                              process_y + process_row_height);
+    if (selected) {
+      Fill(dc, row, kAccentSoft);
+    } else if (IsHovered(hovered, row_command)) {
+      Fill(dc, row, RGB(247, 249, 252));
+    } else if (index % 2 != 0) {
+      Fill(dc, row, RGB(251, 252, 253));
+    }
+    const COLORREF text_color =
+        process.cleanup_eligible || selected ? kPrimaryText : kMutedText;
+    DrawUtf8(dc, body_font_, text_color, process.name,
+             MakeRect(columns[0], process_y, columns[1] - Scale(6),
+                      process_y + process_row_height),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, text_color,
+             FormatPercent(process.cpu_percent),
+             MakeRect(columns[1], process_y, columns[2] - Scale(6),
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    DrawUtf8(dc, metric_font_, text_color,
+             FormatBytes(static_cast<double>(process.working_set_bytes)),
+             MakeRect(columns[2], process_y, columns[3] - Scale(6),
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, metric_font_, text_color,
+             FormatRate(process.read_bytes_per_sec +
+                        process.write_bytes_per_sec),
+             MakeRect(columns[3], process_y, columns[4] - Scale(6),
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const std::string state =
+        selected ? Locale::Get("Selected")
+                 : Locale::Get(process.cleanup_block_reason);
+    DrawUtf8(dc, small_font_,
+             selected ? kAccent
+                      : process.cleanup_eligible ? kSuccess : kMutedText,
+             state,
+             MakeRect(columns[4], process_y, columns[5],
+                      process_y + process_row_height),
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    Line(dc, process_panel.left + margin,
+         process_y + process_row_height - 1, process_panel.right - margin,
+         process_y + process_row_height - 1, kBorder);
+    AddTarget(row, row_command);
+    process_y += process_row_height;
+  }
+  if (coding_processes.empty()) {
+    DrawUtf8(dc, body_font_, kMutedText,
+             Locale::Get("No process inventory is available."),
+             MakeRect(process_panel.left + margin, process_y + Scale(16),
+                      process_panel.right - margin, process_y + Scale(52)),
+             DT_LEFT | DT_TOP | DT_WORDBREAK);
+  } else {
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Format("Showing {0}-{1} of {2}; use the mouse wheel.",
+                            {std::to_string(offset + 1),
+                             std::to_string(process_end),
+                             std::to_string(coding_processes.size())}),
+             MakeRect(process_panel.left + margin,
+                      process_panel.bottom - Scale(28),
+                      process_panel.right - margin,
+                      process_panel.bottom - Scale(6)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
+
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Cleanup Pool"),
+           MakeRect(pool_panel.left + margin, pool_panel.top + Scale(10),
+                    pool_panel.right - margin,
+                    pool_panel.top + Scale(38)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  DrawUtf8(dc, small_font_, kSecondaryText,
+           Locale::Get("Click a selected process to remove it."),
+           MakeRect(pool_panel.left + margin, pool_panel.top + Scale(38),
+                    pool_panel.right - margin,
+                    pool_panel.top + Scale(62)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  int pool_y = pool_panel.top + Scale(72);
+  const int pool_row_height = Scale(58);
+  const int automatic_plan_height = Scale(132);
+  const int pool_list_bottom =
+      std::max(pool_y + Scale(58),
+               static_cast<int>(pool_panel.bottom) - automatic_plan_height);
+  const std::size_t pool_capacity = static_cast<std::size_t>(std::max(
+      0, (pool_list_bottom - pool_y - Scale(28)) / pool_row_height));
+  const std::size_t maximum_pool_offset =
+      options.cleanup_processes.size() > pool_capacity
+          ? options.cleanup_processes.size() - pool_capacity
+          : 0;
+  const std::size_t pool_offset =
+      std::min(options.pool_scroll_offset, maximum_pool_offset);
+  const std::size_t pool_end = std::min(
+      options.cleanup_processes.size(), pool_offset + pool_capacity);
+  for (std::size_t index = pool_offset; index < pool_end; ++index) {
+    const auto& selected = options.cleanup_processes[index];
+    const auto process = std::find_if(
+        model.processes.begin(), model.processes.end(),
+        [&selected](const ProcessViewModel& candidate) {
+          return candidate.pid == selected.pid &&
+                 candidate.start_time_100ns ==
+                     selected.expected_start_time_100ns;
+        });
+    if (process == model.processes.end()) continue;
+    const DashboardUiCommand row_command{
+        DashboardUiAction::ToggleCleanupProcess, DashboardPage::CodingMode,
+        process->pid};
+    const RECT row = MakeRect(pool_panel.left + Scale(1), pool_y,
+                              pool_panel.right - Scale(1),
+                              pool_y + pool_row_height);
+    Fill(dc, row,
+         IsHovered(hovered, row_command) ? RGB(230, 239, 252)
+                                         : kAccentSoft);
+    DrawUtf8(dc, body_font_, kPrimaryText, process->name,
+             MakeRect(row.left + margin, row.top + Scale(4),
+                      row.right - margin, row.top + Scale(28)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const std::string metrics =
+        "PID " + std::to_string(process->pid) + "  |  " +
+        FormatPercent(process->cpu_percent) + "  |  " +
+        FormatBytes(static_cast<double>(process->working_set_bytes)) +
+        "  |  " +
+        FormatRate(process->read_bytes_per_sec +
+                   process->write_bytes_per_sec);
+    DrawUtf8(dc, small_font_, kSecondaryText, metrics,
+             MakeRect(row.left + margin, row.top + Scale(27),
+                      row.right - margin, row.bottom - Scale(4)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    Line(dc, row.left + margin, row.bottom - 1, row.right - margin,
+         row.bottom - 1, RGB(202, 218, 242));
+    AddTarget(row, row_command);
+    pool_y += pool_row_height;
+  }
+  if (options.cleanup_processes.empty()) {
+    DrawUtf8(dc, body_font_, kMutedText,
+             Locale::Get("No processes selected."),
+             MakeRect(pool_panel.left + margin, pool_y + Scale(20),
+                      pool_panel.right - margin,
+                      std::min(pool_list_bottom, pool_y + Scale(58))),
+             DT_LEFT | DT_TOP | DT_WORDBREAK);
+  } else if (pool_offset != 0 ||
+             pool_end < options.cleanup_processes.size()) {
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Format("Showing {0}-{1} of {2}; use the mouse wheel.",
+                            {std::to_string(pool_offset + 1),
+                             std::to_string(pool_end),
+                             std::to_string(
+                                 options.cleanup_processes.size())}),
+             MakeRect(pool_panel.left + margin,
+                      pool_list_bottom - Scale(28),
+                      pool_panel.right - margin,
+                      pool_list_bottom - Scale(6)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+  }
+
+  const int plan_top = pool_list_bottom + Scale(4);
+  Line(dc, pool_panel.left + margin, plan_top, pool_panel.right - margin,
+       plan_top, kBorder);
+  DrawUtf8(dc, section_font_, kPrimaryText, Locale::Get("Automatic Plan"),
+           MakeRect(pool_panel.left + margin, plan_top + Scale(6),
+                    pool_panel.right - margin, plan_top + Scale(34)),
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  int action_y = plan_top + Scale(38);
+  const std::size_t action_count =
+      std::min<std::size_t>(2, model.coding_mode.actions.size());
+  for (std::size_t index = 0; index < action_count; ++index) {
+    const auto& action = model.coding_mode.actions[index];
+    DrawUtf8(dc, body_font_, kPrimaryText, action.target,
+             MakeRect(pool_panel.left + margin, action_y,
+                      pool_panel.right - margin, action_y + Scale(22)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawUtf8(dc, small_font_, kSecondaryText,
+             Locale::Get(action.action) + "  |  " + Locale::Get(action.risk),
+             MakeRect(pool_panel.left + margin, action_y + Scale(20),
+                      pool_panel.right - margin, action_y + Scale(40)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    action_y += Scale(44);
+  }
+  if (model.coding_mode.actions.empty()) {
+    DrawUtf8(dc, small_font_, kMutedText,
+             Locale::Get("No automatic actions."),
+             MakeRect(pool_panel.left + margin, action_y,
+                      pool_panel.right - margin, action_y + Scale(28)),
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  }
 }
 
 void DashboardRenderer::DrawRecovery(

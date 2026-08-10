@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace workboost {
 namespace {
@@ -47,7 +48,8 @@ int PriorityRank(std::uint32_t priority) {
 }  // namespace
 
 OptimizationPlan OptimizationPlanner::Create(
-    const SystemSnapshot& snapshot) const {
+    const SystemSnapshot& snapshot,
+    const std::vector<ProcessSelection>& explicit_close) const {
   OptimizationPlan plan;
   const RuntimeContext context =
       BuildRuntimeContext(snapshot, config_.remote_debug_ports);
@@ -153,6 +155,67 @@ OptimizationPlan OptimizationPlanner::Create(
       }
     }
   }
+
+  std::unordered_set<std::uint32_t> planned_close_pids;
+  for (const auto& action : plan.actions) {
+    if (action.type == ActionType::GracefulCloseProcess) {
+      planned_close_pids.insert(action.pid);
+    }
+  }
+  constexpr std::size_t kMaximumExplicitCloseProcesses = 64;
+  const std::size_t explicit_close_count =
+      std::min(explicit_close.size(), kMaximumExplicitCloseProcesses);
+  if (explicit_close.size() > kMaximumExplicitCloseProcesses) {
+    plan.rejected.push_back("cleanup pool exceeds the 64-process limit");
+  }
+  for (std::size_t index = 0; index < explicit_close_count; ++index) {
+    const auto& selection = explicit_close[index];
+    if (!planned_close_pids.insert(selection.pid).second) continue;
+    const ProcessSnapshot* process = FindProcess(snapshot, selection.pid);
+    const std::string target = "PID " + std::to_string(selection.pid);
+    if (process == nullptr) {
+      plan.rejected.push_back(target + ": selected process is no longer present");
+      continue;
+    }
+    if (selection.expected_start_time_100ns == 0 ||
+        process->start_time_100ns != selection.expected_start_time_100ns) {
+      plan.rejected.push_back(target + ": selected process identity changed");
+      continue;
+    }
+    if (!snapshot.process_inventory_complete ||
+        !snapshot.tcp_inventory_complete) {
+      plan.rejected.push_back(process->name +
+                              ": protection inventory is incomplete");
+      continue;
+    }
+    if (process->is_foreground) {
+      plan.rejected.push_back(process->name +
+                              ": foreground process is not auto-closed");
+      continue;
+    }
+    if (!process->has_visible_window) {
+      plan.rejected.push_back(process->name +
+                              ": no visible top-level window to close");
+      continue;
+    }
+    OptimizationAction action;
+    action.id = "cleanup-close-" + std::to_string(process->pid);
+    action.type = ActionType::GracefulCloseProcess;
+    action.risk = ActionRisk::Low;
+    action.pid = process->pid;
+    action.expected_start_time_100ns = process->start_time_100ns;
+    action.process_name = process->name;
+    action.timeout_ms = 2000;
+    action.explicit_confirmation = true;
+    action.reason = "User-selected Coding Mode cleanup pool";
+    if (policy.CanGracefullyClose(*process, context, true)) {
+      plan.actions.push_back(std::move(action));
+    } else {
+      plan.rejected.push_back(
+          process->name + ": protection policy rejected cleanup selection");
+    }
+  }
+
   const ServiceProtectionPolicy service_policy(config_);
   for (const auto& service : snapshot.services) {
     const std::string name = ToLowerAscii(service.name);
@@ -284,7 +347,8 @@ bool SafetyValidator::Validate(const OptimizationAction& action,
       if (reason) *reason = "target must be visible and outside the foreground";
       return false;
     }
-    if (!policy.CanGracefullyClose(*process, context)) {
+    if (!policy.CanGracefullyClose(*process, context,
+                                   action.explicit_confirmation)) {
       if (reason) *reason = "target is protected by policy";
       return false;
     }

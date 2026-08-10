@@ -17,7 +17,8 @@ class ProtectionPolicy {
                                        const RuntimeContext& context,
                                        bool raise_priority) const;
   [[nodiscard]] bool CanGracefullyClose(const ProcessSnapshot& process,
-                                        const RuntimeContext& context) const;
+                                        const RuntimeContext& context,
+                                        bool explicitly_selected = false) const;
 
  private:
   const Config& config_;
